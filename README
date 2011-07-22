@@ -1,0 +1,5 @@
+This is a Git http server that runs on Google Appengine
+
+Currrently untested, so not recommended for production usage
+
+The project uses Dulwich - a pure Python interface to Git repos
