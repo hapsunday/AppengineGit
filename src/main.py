@@ -2,6 +2,7 @@ from google.appengine.ext.webapp.util import run_wsgi_app
 from google.appengine.ext import webapp
 
 from git_http_protocol import GitRequest
+import rpc
 
 from gae_backend import Repo
 from gae_backend import Repositories
@@ -63,7 +64,7 @@ def main():
 				[
 					('/([A-Za-z0-9]*).git(/.*)', GitRequest),
 					('/favicon.ico', webapp.RequestHandler),
-					('/(.*)', req),
+					('/(.*)', rpc.Request),
 				],
 				debug=True,
 			)
