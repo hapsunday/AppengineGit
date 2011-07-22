@@ -1,5 +1,0 @@
-include NEWS
-include README
-include Makefile
-include COPYING
-include docs/protocol.txt
