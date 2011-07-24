@@ -37,7 +37,7 @@ class ComponentRegistry(object):
 			logging.error("403 denied")
 		fn = getattr(self._components[comp], func);
 		return fn(**args)
-registry = ComponentRegistry()
+componentManager = ComponentRegistry()
 
 def remote(fn, auth_level=None):
 	"""
@@ -45,7 +45,7 @@ def remote(fn, auth_level=None):
 	
 	"""
 	name = fn.func_name
-	registry.addMethod(name, auth_level)
+	componentManager.addMethod(name, auth_level)
 	return fn
 	
 class Component(object):
@@ -57,4 +57,4 @@ class Component(object):
 		:param component_name: the name which will be used to refer to the component
 		:type component_name: string
 		"""
-		registry.register(self, component_name) 
+		componentManager.register(self, component_name) 

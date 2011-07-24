@@ -1,11 +1,17 @@
 from google.appengine.ext import webapp
-from rpc import component
-from rpc import auth
-auth.Auth()
+from rpc.component import componentManager
+from rpc.auth import AuthManager
+AuthManager()
+from rpc.repo import RepoManager
+RepoManager()
 from django.utils import simplejson as json
 
 class Request(webapp.RequestHandler):
-	def get(self, path):
+	def get(self, path=None):
+		"""
+		@todo: remove the contents of this function and return a 404
+		the contents of this function make it easier to send post requests and need to be removed
+		"""
 		self.response.headers['Content-Type'] = 'text/html'
 		self.response.out.write("""
 			<form action="/" method="POST">
@@ -15,7 +21,7 @@ class Request(webapp.RequestHandler):
 			</form>
 		""")
 	
-	def post(self, path):
+	def post(self, path=None):
 		method = self.request.get('method', False)
 		s_args = self.request.get('args', False)
 		if method == False or s_args == False:
@@ -30,4 +36,5 @@ class Request(webapp.RequestHandler):
 			if type(val) == type(u''):
 				val = val.encode(ENCODING)
 			args[key] = val
-		return component.registry.call(method, args)
+		response = componentManager.call(method, args)
+		self.response.out.write( json.dumps( response ) )
