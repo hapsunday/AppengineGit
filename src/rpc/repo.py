@@ -27,6 +27,15 @@ class RepoManager(Component):
 		"""
 		repo = Repo.init_bare(name)
 	
+	def oldcreate(self, name):
+		"""
+		create a new repo
+		
+		:param name: the name to give the new repo
+		:type name: string
+		"""
+		repo = Repo.init_bare(name)
+	
 		from dulwich.objects import Tree
 		tree = Tree()
 		

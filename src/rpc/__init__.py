@@ -4,6 +4,7 @@ from rpc.auth import AuthManager
 AuthManager()
 from rpc.repo import RepoManager
 RepoManager()
+
 from django.utils import simplejson as json
 
 class Request(webapp.RequestHandler):
@@ -15,8 +16,8 @@ class Request(webapp.RequestHandler):
 		self.response.headers['Content-Type'] = 'text/html'
 		self.response.out.write("""
 			<form action="/" method="POST">
-				<label style="display:block;">Method: <input type="text" name="method" value="auth.login"/></label>
-				<label style="display:block;">Args: <input type="text" name="args" style="width:500px;" value='{"username":"myname","password":"mypass"}'/></label>
+				<label style="display:block;">Method: <input type="text" name="method" value="repo.create"/></label>
+				<label style="display:block;">Args: <input type="text" name="args" style="width:500px;" value='{"name":"test"}'/></label>
 				<label style="display:block;"><input type="submit" name="submit" value="submit"/></label>
 			</form>
 		""")
