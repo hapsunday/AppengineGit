@@ -45,6 +45,7 @@ def remote(fn, auth_level=None):
 	
 	"""
 	name = fn.func_name
+	#fn.func_code.co_argcount -1 == the number of arguments that should be passed to the function
 	componentManager.addMethod(name, auth_level)
 	return fn
 	

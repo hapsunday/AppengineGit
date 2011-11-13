@@ -13,9 +13,9 @@ def main():
 	run_wsgi_app(
 			webapp.WSGIApplication(
 				[
-					('/([A-Za-z0-9]*).git(/.*)', GitRequest),
+					('/([A-Za-z0-9]+).git(/.*)', GitRequest),
 					('/favicon.ico', webapp.RequestHandler),
-					('/(.*)', rpc.Request),
+					('/rpc/([A-Za-z\.]+)', rpc.Request),
 				],
 				debug=True,
 			)
