@@ -38,7 +38,6 @@ class Repositories(db.Model):
 	pass
 
 class NamedFiles(db.Model):
-	#key name = filename or path
 	repository = db.ReferenceProperty(Repositories)
 	filename = db.StringProperty()
 	contents = db.TextProperty()
@@ -135,14 +134,19 @@ class Repo(BaseRepo):
 		return repo
 		
 
-#Object Store
-class Objects(db.Model):
-	repository = db.ReferenceProperty(Repositories)
+#object/pack store
+#objects reference the blob, not the other way round
+class Object(db.Model):
+	packdata = db.ReferenceProperty(Pack)
 	sha1 = db.StringProperty()
-	data = db.BlobProperty()
 	type_num = db.IntegerProperty()
+	
+class Pack(db.Model):
+	repository = db.ReferenceProperty(Repositories)
+	sha1 = db.StringListProperty()
+	data = db.BlobProperty()
 
-class ObjectStore(BaseObjectStore):
+class ObjectStore(PackBasedObjectStore):
 	""" object store interface """
 	def __init__(self, REPO_NAME):
 		"""
@@ -150,49 +154,64 @@ class ObjectStore(BaseObjectStore):
 			:param REPO_NAME: the name of the repository object_store should access
 		"""
 		self.REPO_NAME = REPO_NAME
-
-	def _query(self, sha):
+	
+	def contains_loose(self, sha):
 		"""
-			returns a datastore query filtered by the repo and a given
-			hex encoded sha
-			:param sha: hex encoded sha, to filter the datastore query
+			returns true if an object exists
+			as all objects are stored in packs this will be false
+		"""
+		return False
+	
+	def _iter_loose_objects(self):
+		"""Iterate over the SHAs of all loose objects."""
+		raise NotImplementedError(self._iter_loose_objects)
+
+	def _get_loose_object(self, sha):
+		raise NotImplementedError(self._get_loose_object)
+
+	def _remove_loose_object(self, sha):
+		raise NotImplementedError(self._remove_loose_object)
+	
+	def contains_packed(self, sha):
+		"""
+			returns true if an object is stored inside a pack
 		"""
 		repo = Repositories.get_by_key_name(self.REPO_NAME)
 		obj = db.Query(Objects)
-		obj.filter('sha1 =', sha)
 		obj.filter('repository =', repo)
-		return obj
-	
-	def contains_loose(self, sha):
-		"""returns true if an object exists"""
-		obj = self._query(sha)
-		if(obj.count(1)):
+		obj.filter('sha1 =', sha)
+		if( obj.count(1)):
 			return True
 		else:
 			return False
 
-	def contains_packed(self, sha):
-		"""we don't pack objects so always false"""
-		return False
+	def _load_packs(self):
+		"""
+			returns a list of dulwich.pack.Pack() objects
+		"""
+		raise NotImplementedError(self._load_packs)
+
+	def _pack_cache_stale(self):
+		"""Check whether the pack cache is stale."""
+		raise NotImplementedError(self._pack_cache_stale)
 
 	def __iter__(self):
 		"""iterate over all sha1s in the objects table"""
-		#I believe to improve performance app engine can just retrieve the keynames
-		#@TODO: this is really bad performance wise, as we are copying the entire database
-		#	we could probably make an iter object which includes the next() function
-		#		this function would make a database call. every time it needs a new sha1
-		#	this might be the type of data that should be cached in memcache. as this is
-		#		not a pack based object store, there will be a large number of database calls
-		#		as each object must be fetched individually
-		sha1s = []
-		for obj in db.Query(Objects):
-			sha1s.append(obj)
-		return sha1s.__iter__()
+		repo = Repositories.get_by_key_name(self.REPO_NAME)
+		q = db.Query(Objects)
+		q.filter('repository = ', repo)
+		#i'm fairly sure the GAE db.Query object is an iterator hence we can just return the instance
+		return q.__iter__()
 
-	@property
-	def packs(self):
-		"""List of packed objects, we don't pack objects"""
-		return []
+#	#implemented by parent class
+#	@property
+#	def packs(self):
+#		"""
+#			Returns a list of dulwich.pack.Pack()
+#			these would be generated from the datastore blobs
+#			-- this will be a very high cost query --
+#		"""
+#		return []
 
 	def get_raw(self, name):
 		"""return a tuple containing the numeric type and object contents"""
@@ -203,11 +222,11 @@ class ObjectStore(BaseObjectStore):
 			commit	: 1
 			tree	: 2
 			blob	: 3
-			tag		: 4
+			tag	: 4
 		"""
 		if(len(name)==20):
-			name = sha_to_hex(name)	#breakpoint
-		obj = self._query(name)		#breakpoint
+			name = sha_to_hex(name)
+		obj = self._query(name)
 		count = obj.count(1)
 		if count:
 			obj = obj.get()
@@ -216,10 +235,10 @@ class ObjectStore(BaseObjectStore):
 				the dict below is a stupid way to convert a long to an integer
 				because using python functions to convert between a long and an int
 				are giving me trouble
-				CURRENTLY: this horribel implementation works and there are other things that need fixing
+				CURRENTLY: this horrible implementation works and there are other things that need fixing
 			"""
 			a = int(obj.type_num)
-			a = {					#breakpoint
+			a = {
 				1:1,
 				2:2,
 				3:3,
@@ -229,20 +248,31 @@ class ObjectStore(BaseObjectStore):
 		else:
 			raise KeyError(name)
 
-	def __delitem__(self, name):
-		"""delete item (testing only)"""
-		obj = self._query(name)
-		obj.delete()
-		#delete the row
-
 	def add_object(self, obj):
-		"""adds a single object to the datastore"""
+		"""
+			adds a single object to the datastore
+			we should only be getting thin packs
+			the packs will be converted to full pack and be added through add_objects
+		"""
+		import logging
+		logging.error("call to add object")
+		raise CommitError
 		Objects(
 			repository = Repositories.get_by_key_name(self.REPO_NAME).key(),
 			sha1 = obj.id,
 			data = obj.as_raw_string(),
 			type_num = obj.type_num,
 		).put()
+
+	def add_objects(self, objects)
+		#get the pack blobstore key
+		for o in objects:
+			Object(
+				repository = Repositories.get_by_key_name(self.REPO_NAME),
+				sha1 = o.id,
+				type_num = o.type_num,
+				packdata = #blobstore key
+			)
 
 	def add_objects(self, objects):
 		"""calls add_object multiple times
@@ -271,7 +301,7 @@ class ObjectStore(BaseObjectStore):
 				p = ThinPackExtractor(self, fileContents)
 				p.extract()
 				p.close()
-			except:#remove this after debugging
+			except:
 				raise CommitError
 			return p
 		
