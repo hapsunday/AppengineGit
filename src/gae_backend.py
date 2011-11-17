@@ -6,7 +6,7 @@ from dulwich.repo import (
 	BaseRepo,
 	RefsContainer as BaseRefsContainer,
 )
-from dulwich.object_store import BaseObjectStore
+from dulwich.object_store import PackBasedObjectStore
 from dulwich.objects import (
 	ShaFile,
 	sha_to_hex,
@@ -198,7 +198,7 @@ class ObjectStore(PackBasedObjectStore):
 	def __iter__(self):
 		"""iterate over all sha1s in the objects table"""
 		repo = Repositories.get_by_key_name(self.REPO_NAME)
-		q = db.Query(Objects)
+		q = db.Query(Object)
 		q.filter('repository = ', repo)
 		#i'm fairly sure the GAE db.Query object is an iterator hence we can just return the instance
 		return q.__iter__()
@@ -257,14 +257,14 @@ class ObjectStore(PackBasedObjectStore):
 		import logging
 		logging.error("call to add object")
 		raise CommitError
-		Objects(
+		Object(
 			repository = Repositories.get_by_key_name(self.REPO_NAME).key(),
 			sha1 = obj.id,
 			data = obj.as_raw_string(),
 			type_num = obj.type_num,
 		).put()
 
-	def add_objects(self, objects)
+	def add_objects(self, objects):
 		#get the pack blobstore key
 		for o in objects:
 			Object(
@@ -272,14 +272,7 @@ class ObjectStore(PackBasedObjectStore):
 				sha1 = o.id,
 				type_num = o.type_num,
 				packdata = #blobstore key
-			)
-
-	def add_objects(self, objects):
-		"""calls add_object multiple times
-			@todo: this could be improved as I believe appengine allows multiple inserts
-				in a single datastore operation"""
-		for obj in objects:
-			self.add_object(obj)
+			).save()
 
 	def add_thin_pack(self):
 		"""
