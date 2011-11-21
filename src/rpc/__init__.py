@@ -48,7 +48,7 @@ class Request(webapp.RequestHandler):
 		#parse arguments
 		regex = re.compile('([A-Za-z0-9]+)=([A-Za-z0-9]+)\&?')
 		args = {}
-		for arg in regex.findall(self.request.body).groups():
+		for arg in regex.findall(self.request.body):
 			args[arg[0]] = arg[1]
 
 		response = componentManager.call(method, args)
