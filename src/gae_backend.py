@@ -16,7 +16,6 @@ from dulwich.objects import (
 	ShaFile,
 	sha_to_hex,
 )
-from dulwich.pack import ThinPackData
 from dulwich.errors import (
     MissingCommitError,
     NoIndexPresent,
@@ -315,7 +314,9 @@ class ObjectStore(PackBasedObjectStore):
 		def newcommit():
 			try:
 				#write the new pack
-				ThinPack = ThinPackData(self.get_raw, filename=None, fileIO=fileContents)
+				logging.error('starting the write')
+				#creating a copy of fileContents is done to move the file pointer back to the beginning
+				ThinPack = ThinPackData(self.get_raw, filename=None, file=StringIO(fileContents.getvalue()))
 				p = Pack.Create(ThinPack)
 				store = PackStore(
 					repository = self.REPO,
@@ -333,6 +334,8 @@ class ObjectStore(PackBasedObjectStore):
 					store.sha1.append(sha)
 				store.save()
 			except:
+				import traceback
+				traceback.print_exc()
 				raise CommitError
 			return p
 		return fileContents, newcommit
@@ -349,21 +352,14 @@ class Pack(PackData):
 		"""
 			ThinPack is an instance of class ThinPackData(PackData) from dulwich.pack
 		"""
-		"""
-			gather all external references and create a pack object
-			save this object in the blobstore, return a Pack class with the current blobstore reference
-			
-			a call to write_pack
-				call write_pack_data
-					call write_pack_object
-			this is the method dulwich pack uses and it resolves external objects just before write time.
-			- what this means is that if we simply write to the pack it will automatically resolve objects, and no need to do it before hand
-		"""
 		blob_name = files.blobstore.create(mime_type='application/octet-stream')
 
 		#write data
 		with files.open(blob_name, 'a') as f:
 			#I don't understand the second parameter, but it is the same as the one in DiskObjectStore
+			#the second parameter is not PackData but is rather a pack
+			# dulwich.pack.Pack is called as follows Pack(PackData, Index)
+			#I need to build an index class for the datastore
 			write_pack_data(f, ((o, None) for o in ThinPack.iterobjects()), len(ThinPack))
 		files.finalize(blob_name)
 
