@@ -40,7 +40,7 @@ class GitRequest(webapp.RequestHandler):
 				self.response.out.write('Unsupported service %s' % service)
 				return
 		else:
-			self.out.response.write("This page responds to git dumb prototcol requests")
+			self.response.out.write("This page responds to git dumb prototcol requests")
 			raise NotImplementedError("the git (dumb) http protocol not implemented yet")
 			
 	
