@@ -7,6 +7,11 @@ from dulwich.repo import (
 	RefsContainer as BaseRefsContainer,
 )
 from dulwich.object_store import PackBasedObjectStore
+from dulwich.pack import (
+	PackData,
+	ThinPackData,
+	write_pack_data,
+)
 from dulwich.objects import (
 	ShaFile,
 	sha_to_hex,
@@ -29,6 +34,7 @@ from google.appengine.ext import (
 	db,
 	blobstore,
 )
+from google.appengine.api import files
 #python imports
 from StringIO import StringIO
 import logging
@@ -136,15 +142,19 @@ class Repo(BaseRepo):
 
 #object/pack store
 #objects reference the blob, not the other way round
-class Object(db.Model):
-	packdata = db.ReferenceProperty(Pack)
-	sha1 = db.StringProperty()
-	type_num = db.IntegerProperty()
-	
-class Pack(db.Model):
+class PackStore(db.Model):
 	repository = db.ReferenceProperty(Repositories)
 	sha1 = db.StringListProperty()
 	data = db.BlobProperty()
+
+class PackStoreIndexes(db.Model):
+	"""
+		This is needed, pack indexes are stored in a separate file. This table is that separate file
+		The indexes appear to be a cache (of sorts) as the index data can be created from the pack data
+	"""
+	packref = db.ReferenceProperty(PackStore)
+	sha1 = db.StringProperty()
+	type_num = db.IntegerProperty()
 
 class ObjectStore(PackBasedObjectStore):
 	""" object store interface """
@@ -154,6 +164,7 @@ class ObjectStore(PackBasedObjectStore):
 			:param REPO_NAME: the name of the repository object_store should access
 		"""
 		self.REPO_NAME = REPO_NAME
+		self.REPO = Repositories.get_by_key_name(self.REPO_NAME)
 	
 	def contains_loose(self, sha):
 		"""
@@ -176,44 +187,33 @@ class ObjectStore(PackBasedObjectStore):
 		"""
 			returns true if an object is stored inside a pack
 		"""
-		repo = Repositories.get_by_key_name(self.REPO_NAME)
-		obj = db.Query(Objects)
-		obj.filter('repository =', repo)
+		obj = db.Query(PackStoreIndexes)
+		obj.filter('repository =', self.REPO)
 		obj.filter('sha1 =', sha)
 		if( obj.count(1)):
 			return True
 		else:
 			return False
 
-	def _load_packs(self):
-		"""
-			returns a list of dulwich.pack.Pack() objects
-		"""
-		raise NotImplementedError(self._load_packs)
-
-	def _pack_cache_stale(self):
-		"""Check whether the pack cache is stale."""
-		raise NotImplementedError(self._pack_cache_stale)
-
 	def __iter__(self):
 		"""iterate over all sha1s in the objects table"""
 		repo = Repositories.get_by_key_name(self.REPO_NAME)
-		q = db.Query(Object)
+		q = db.Query(PackStoreIndexes)
 		q.filter('repository = ', repo)
 		#i'm fairly sure the GAE db.Query object is an iterator hence we can just return the instance
 		return q.__iter__()
 
-#	#implemented by parent class
-#	@property
-#	def packs(self):
-#		"""
-#			Returns a list of dulwich.pack.Pack()
-#			these would be generated from the datastore blobs
-#			-- this will be a very high cost query --
-#		"""
-#		return []
+	#implemented by parent class
+	@property
+	def packs(self):
+		"""
+			Returns a list of dulwich.pack.Pack()
+			these would be generated from the datastore blobs
+			-- this will be a very high cost query --
+		"""
+		return []
 
-	def get_raw(self, name):
+	def get_raw2(self, name):
 		"""return a tuple containing the numeric type and object contents"""
 		"""
 			:return: string
@@ -248,16 +248,39 @@ class ObjectStore(PackBasedObjectStore):
 		else:
 			raise KeyError(name)
 
+	def get_raw(self, name):
+		"""
+			return a tuple containing the numeric type and object contents
+			:param name: the sha1 of the object
+		"""
+		if(len(name)==20):
+			name = sha_to_hex(name)
+		query = db.Query(PackStoreIndexes)
+		query.filter("repository =", self.REPO)
+		query.filter("sha1 =", name)
+		if query.count(1):
+			obj = query.get()
+			""" horrible implementation due to earlier problems not ready to sort out yet"""
+			type_num = {
+				1:1,
+				2:2,
+				3:3,
+				4:4,
+			}.get(obj.type_num)
+			output = Pack(obj.packref.data).get_ref(name)
+			return output[3]
+		else:
+			raise KeyError(name)
+
 	def add_object(self, obj):
 		"""
 			adds a single object to the datastore
 			we should only be getting thin packs
 			the packs will be converted to full pack and be added through add_objects
 		"""
-		import logging
 		logging.error("call to add object")
 		raise CommitError
-		Object(
+		PackStoreIndexes(
 			repository = Repositories.get_by_key_name(self.REPO_NAME).key(),
 			sha1 = obj.id,
 			data = obj.as_raw_string(),
@@ -267,11 +290,11 @@ class ObjectStore(PackBasedObjectStore):
 	def add_objects(self, objects):
 		#get the pack blobstore key
 		for o in objects:
-			Object(
+			PackStoreIndexes(
 				repository = Repositories.get_by_key_name(self.REPO_NAME),
 				sha1 = o.id,
 				type_num = o.type_num,
-				packdata = #blobstore key
+#				packdata = #blobstore key
 			).save()
 
 	def add_thin_pack(self):
@@ -289,16 +312,73 @@ class ObjectStore(PackBasedObjectStore):
 			how memory object store works
 		"""
 		fileContents = StringIO("")
-		def commit():
+		def newcommit():
 			try:
-				p = ThinPackExtractor(self, fileContents)
-				p.extract()
-				p.close()
+				#write the new pack
+				ThinPack = ThinPackData(self.get_raw, filename=None, fileIO=fileContents)
+				p = Pack.Create(ThinPack)
+				store = PackStore(
+					repository = self.REPO,
+					data = p.blob_key,
+				)
+				#write indexes
+				for entry in p.iterenteries():
+					sha = sha_to_hex(entry[0])
+					typeNum, rawChunks = p.get_object_at(entry[1])
+					PackStoreIndexes(
+						packref = store,
+						sha1 = sha,
+						type_num = typeNum,
+					).save()
+					store.sha1.append(sha)
+				store.save()
 			except:
 				raise CommitError
 			return p
+		return fileContents, newcommit
+	
+
+class Pack(PackData):
+	"""
+		What I want this class to do
+			- return a dulwich.pack.Pack object from a blobstore key
+			- generate a new pack dulwich.pack.Pack from a ThinPackData
+	"""	
+	@classmethod
+	def Create(cls, ThinPack):
+		"""
+			ThinPack is an instance of class ThinPackData(PackData) from dulwich.pack
+		"""
+		"""
+			gather all external references and create a pack object
+			save this object in the blobstore, return a Pack class with the current blobstore reference
+			
+			a call to write_pack
+				call write_pack_data
+					call write_pack_object
+			this is the method dulwich pack uses and it resolves external objects just before write time.
+			- what this means is that if we simply write to the pack it will automatically resolve objects, and no need to do it before hand
+		"""
+		blob_name = files.blobstore.create(mime_type='application/octet-stream')
+
+		#write data
+		with files.open(blob_name, 'a') as f:
+			#I don't understand the second parameter, but it is the same as the one in DiskObjectStore
+			write_pack_data(f, ((o, None) for o in ThinPack.iterobjects()), len(ThinPack))
+		files.finalize(blob_name)
+
+		blob_key = files.blobstore.get_blob_key(blob_name)
 		
-		return fileContents, commit
+		return cls(blob_key)
+	
+	def __init__(self, blob_key):
+		self._blob_key = blob_key
+		blob_reader = blobstore.BlobReader(blob_key)
+		super(Pack, self).__init__(filename=None, file=blob_reader)
+
+	@property
+	def blob_key(self):
+		return self._blob_key
 
 class ThinPackExtractor(ThinPackData):
 	"""
@@ -311,7 +391,7 @@ class ThinPackExtractor(ThinPackData):
 		"""self._file is created in ThinPackData"""
 		self.object_store = object_store
 		super(ThinPackExtractor, self).__init__(self.object_store.get_raw, filename=None, file=StringIO(fileIO.getvalue()))
-		#this new stringIO business is due to me being stupid and not beaing able to figure out how to seek to the begginning of the string
+		#this new stringIO business is due to me being stupid and not being able to figure out how to seek to the beginning of the string
 		
 	def extract(self):
 		"""
@@ -341,7 +421,7 @@ class ThinPackExtractor(ThinPackData):
 		return self._size
 	
 	def check(self):
-		logging.error("NOT IMPLEMENTED: AppengineRepo.py ThinPackExtractor.check(): this should verify the objects have been written correctly")
+		logging.error("NOT IMPLEMENTED: gae_backend.py ThinPackExtractor.check(): this should verify the objects have been written correctly")
 		"""
 			#@todo: 
 			#we need to verify that everything was written correctly
