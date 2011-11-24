@@ -8,7 +8,8 @@ from dulwich.repo import (
 )
 from dulwich.object_store import PackBasedObjectStore
 from dulwich.pack import (
-	PackData,
+	Pack as DulwichPack,
+	PackIndex as DulwichPackIndex,
 	ThinPackData,
 	write_pack_data,
 )
@@ -146,14 +147,15 @@ class PackStore(db.Model):
 	sha1 = db.StringListProperty()
 	data = db.BlobProperty()
 
-class PackStoreIndexes(db.Model):
+class PackStoreIndex(db.Model):
 	"""
 		This is needed, pack indexes are stored in a separate file. This table is that separate file
 		The indexes appear to be a cache (of sorts) as the index data can be created from the pack data
 	"""
 	packref = db.ReferenceProperty(PackStore)
-	sha1 = db.StringProperty()
-	type_num = db.IntegerProperty()
+	sha = db.StringProperty() #@TODO: should be a binary property, the sha is not hex encoded
+	offset = db.IntegerProperty()
+	crc32 = db.IntegerProperty()
 
 class ObjectStore(PackBasedObjectStore):
 	""" object store interface """
@@ -186,7 +188,7 @@ class ObjectStore(PackBasedObjectStore):
 		"""
 			returns true if an object is stored inside a pack
 		"""
-		obj = db.Query(PackStoreIndexes)
+		obj = db.Query(PackStoreIndex)
 		obj.filter('repository =', self.REPO)
 		obj.filter('sha1 =', sha)
 		if( obj.count(1)):
@@ -197,7 +199,7 @@ class ObjectStore(PackBasedObjectStore):
 	def __iter__(self):
 		"""iterate over all sha1s in the objects table"""
 		repo = Repositories.get_by_key_name(self.REPO_NAME)
-		q = db.Query(PackStoreIndexes)
+		q = db.Query(PackStoreIndex)
 		q.filter('repository = ', repo)
 		#i'm fairly sure the GAE db.Query object is an iterator hence we can just return the instance
 		return q.__iter__()
@@ -254,9 +256,9 @@ class ObjectStore(PackBasedObjectStore):
 		"""
 		if(len(name)==20):
 			name = sha_to_hex(name)
-		query = db.Query(PackStoreIndexes)
-		query.filter("repository =", self.REPO)
-		query.filter("sha1 =", name)
+		query = db.Query(PackStoreIndex)
+		#query.filter("repository =", self.REPO)
+		query.filter("sha =", name)
 		if query.count(1):
 			obj = query.get()
 			""" horrible implementation due to earlier problems not ready to sort out yet"""
@@ -266,7 +268,7 @@ class ObjectStore(PackBasedObjectStore):
 				3:3,
 				4:4,
 			}.get(obj.type_num)
-			output = Pack(obj.packref.data).get_ref(name)
+			output = Pack(obj.packref).get_ref(name)
 			return output[3]
 		else:
 			raise KeyError(name)
@@ -279,7 +281,7 @@ class ObjectStore(PackBasedObjectStore):
 		"""
 		logging.error("call to add object")
 		raise CommitError
-		PackStoreIndexes(
+		PackStoreIndex(
 			repository = Repositories.get_by_key_name(self.REPO_NAME).key(),
 			sha1 = obj.id,
 			data = obj.as_raw_string(),
@@ -289,7 +291,7 @@ class ObjectStore(PackBasedObjectStore):
 	def add_objects(self, objects):
 		#get the pack blobstore key
 		for o in objects:
-			PackStoreIndexes(
+			PackStoreIndex(
 				repository = Repositories.get_by_key_name(self.REPO_NAME),
 				sha1 = o.id,
 				type_num = o.type_num,
@@ -316,17 +318,18 @@ class ObjectStore(PackBasedObjectStore):
 				#write the new pack
 				logging.error('starting the write')
 				#creating a copy of fileContents is done to move the file pointer back to the beginning
-				ThinPack = ThinPackData(self.get_raw, filename=None, file=StringIO(fileContents.getvalue()))
-				p = Pack.Create(ThinPack)
-				store = PackStore(
-					repository = self.REPO,
-					data = p.blob_key,
-				)
+				fileContents.seek(0,2)
+				tempstring = StringIO(fileContents.getvalue())
+				ThinPack = ThinPackData(self.get_raw, filename=None, file=tempstring, size=fileContents.tell())
+				store = PackStore(repository = self.REPO)
+				store.save()
+				p = Pack.Create(store, ThinPack)
+
 				#write indexes
 				for entry in p.iterenteries():
 					sha = sha_to_hex(entry[0])
 					typeNum, rawChunks = p.get_object_at(entry[1])
-					PackStoreIndexes(
+					PackStoreIndex(
 						packref = store,
 						sha1 = sha,
 						type_num = typeNum,
@@ -341,40 +344,82 @@ class ObjectStore(PackBasedObjectStore):
 		return fileContents, newcommit
 	
 
-class Pack(PackData):
+class Pack(DulwichPack):
 	"""
 		What I want this class to do
 			- return a dulwich.pack.Pack object from a blobstore key
 			- generate a new pack dulwich.pack.Pack from a ThinPackData
 	"""	
 	@classmethod
-	def Create(cls, ThinPack):
+	def Create(cls, pack_store, data):
 		"""
-			ThinPack is an instance of class ThinPackData(PackData) from dulwich.pack
+			data is an instance of class ThinPackData(PackData) from dulwich.pack
 		"""
-		blob_name = files.blobstore.create(mime_type='application/octet-stream')
-
+		idx = PackIndex.create(pack_store, data)
+		self = cls.from_objects(data, idx)
+		
+		f = StringIO()
+		write_pack_data(f, ((o, None) for o in self.iterobjects()), len(self))
 		#write data
-		with files.open(blob_name, 'a') as f:
-			#I don't understand the second parameter, but it is the same as the one in DiskObjectStore
-			#the second parameter is not PackData but is rather a pack
-			# dulwich.pack.Pack is called as follows Pack(PackData, Index)
-			#I need to build an index class for the datastore
-			write_pack_data(f, ((o, None) for o in ThinPack.iterobjects()), len(ThinPack))
+		blob_name = files.blobstore.create(mime_type='application/octet-stream')
+		with files.open(blob_name, 'a') as blob:
+			blob.write(f.getvalue()) #is this how you correctly write to the datastore?
 		files.finalize(blob_name)
 
-		blob_key = files.blobstore.get_blob_key(blob_name)
-		
-		return cls(blob_key)
+		self.pack_store = pack_store
+		#the line below is what is breaking the application, and I need the internet to find out how to do it
+		self.pack_store.data = blobstore.get(files.blobstore.get_blob_key(blob_name))
+		self.pack_store.save()
+		return self
 	
-	def __init__(self, blob_key):
-		self._blob_key = blob_key
-		blob_reader = blobstore.BlobReader(blob_key)
+	def __init__(self, pack_store):
+		self.pack_store = pack_store
+		blob_reader = blobstore.BlobReader(self.pack_store.data)
 		super(Pack, self).__init__(filename=None, file=blob_reader)
 
-	@property
-	def blob_key(self):
-		return self._blob_key
+class PackIndex(DulwichPackIndex):
+	"""Pack index that is stored entirely in memory."""
+	@classmethod
+	def create(cls, pack_store, pack_data):
+		for sha, offset, crc32 in pack_data.iterentries():
+			pack_store.sha1.append(sha)
+			PackStoreIndex(
+				packref = pack_store,
+				sha = sha_to_hex(sha),
+				offset = offset,
+				crc32 = crc32,
+			).save()
+		return cls(pack_store, pack_data.get_stored_checksum())
+	
+	def __init__(self, pack_store, pack_checksum=None):
+		"""Create a new MemoryPackIndex.
+
+		:param entries: Sequence of name, idx, crc32 (sorted)
+		:param pack_checksum: Optional pack checksum
+		"""
+		self._by_sha = {}
+		self._entries = []
+		q = db.Query(PackStoreIndex)
+		q.filter('packref =', pack_store)
+		for obj in q:
+			self._by_sha[obj.sha] = obj.offset
+			self._entries.append( [obj.sha, obj.offset, obj.crc32] )
+		self._pack_checksum = pack_checksum
+
+	def get_pack_checksum(self):
+		return self._pack_checksum
+
+	def __len__(self):
+		return len(self._entries)
+
+	def _object_index(self, sha):
+		return self._by_sha[sha][0]
+
+	def _itersha(self):
+		return iter(self._by_sha)
+
+	def iterentries(self):
+		return iter(self._entries)
 
 class ThinPackExtractor(ThinPackData):
 	"""
