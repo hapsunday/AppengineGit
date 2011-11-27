@@ -28,6 +28,7 @@ from dulwich.errors import (
     PackedRefsException,
     CommitError,
     RefFormatError,
+    ChecksumMismatch
    )
 #appengine imports
 from google.appengine.ext import (
@@ -145,7 +146,7 @@ class Repo(BaseRepo):
 class PackStore(db.Model):
 	repository = db.ReferenceProperty(Repositories)
 	sha1 = db.StringListProperty()
-	data = db.BlobProperty()
+	data = blobstore.BlobReferenceProperty()
 
 class PackStoreIndex(db.Model):
 	"""
@@ -214,7 +215,7 @@ class ObjectStore(PackBasedObjectStore):
 		"""
 		return []
 
-	def get_raw2(self, name):
+	def get_raw_old(self, name):
 		"""return a tuple containing the numeric type and object contents"""
 		"""
 			:return: string
@@ -261,13 +262,6 @@ class ObjectStore(PackBasedObjectStore):
 		query.filter("sha =", name)
 		if query.count(1):
 			obj = query.get()
-			""" horrible implementation due to earlier problems not ready to sort out yet"""
-			type_num = {
-				1:1,
-				2:2,
-				3:3,
-				4:4,
-			}.get(obj.type_num)
 			output = Pack(obj.packref).get_ref(name)
 			return output[3]
 		else:
@@ -324,18 +318,6 @@ class ObjectStore(PackBasedObjectStore):
 				store = PackStore(repository = self.REPO)
 				store.save()
 				p = Pack.Create(store, ThinPack)
-
-				#write indexes
-				for entry in p.iterenteries():
-					sha = sha_to_hex(entry[0])
-					typeNum, rawChunks = p.get_object_at(entry[1])
-					PackStoreIndex(
-						packref = store,
-						sha1 = sha,
-						type_num = typeNum,
-					).save()
-					store.sha1.append(sha)
-				store.save()
 			except:
 				import traceback
 				traceback.print_exc()
@@ -368,24 +350,31 @@ class Pack(DulwichPack):
 
 		self.pack_store = pack_store
 		#the line below is what is breaking the application, and I need the internet to find out how to do it
-		self.pack_store.data = blobstore.get(files.blobstore.get_blob_key(blob_name))
+		self.pack_store.data = files.blobstore.get_blob_key(blob_name)
 		self.pack_store.save()
 		return self
 	
+	""" this was commented out for committing """
 	def __init__(self, pack_store):
-		self.pack_store = pack_store
-		blob_reader = blobstore.BlobReader(self.pack_store.data)
-		super(Pack, self).__init__(filename=None, file=blob_reader)
+		if pack_store == "":
+			"this is to ensure FromObjects will work"
+			super(Pack, self).__init__("")
+		else:
+			"@TODO: trying to create a new Pack from the datastore"
+			self.pack_store = pack_store
+			blob_reader = blobstore.BlobReader(self.pack_store.data)
+			super(Pack, self).__init__(filename=None, file=blob_reader)
 
 class PackIndex(DulwichPackIndex):
 	"""Pack index that is stored entirely in memory."""
 	@classmethod
 	def create(cls, pack_store, pack_data):
 		for sha, offset, crc32 in pack_data.iterentries():
+			sha = sha_to_hex(sha)
 			pack_store.sha1.append(sha)
 			PackStoreIndex(
 				packref = pack_store,
-				sha = sha_to_hex(sha),
+				sha = sha,
 				offset = offset,
 				crc32 = crc32,
 			).save()
@@ -420,6 +409,16 @@ class PackIndex(DulwichPackIndex):
 
 	def iterentries(self):
 		return iter(self._entries)
+	
+	def check(self):
+		"""Check that the stored checksum matches the actual checksum."""
+		logging.error("gae_backend.py -> PackIndex.Check()")
+		return
+		# taken from Pack.FilePackIndex
+		#actual = self.calculate_checksum()
+		#stored = self.get_stored_checksum()
+		#if actual != stored:
+		#	raise ChecksumMismatch(stored, actual)
 
 class ThinPackExtractor(ThinPackData):
 	"""
