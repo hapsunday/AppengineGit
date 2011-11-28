@@ -10,6 +10,7 @@ from dulwich.object_store import PackBasedObjectStore
 from dulwich.pack import (
 	Pack as DulwichPack,
 	PackIndex as DulwichPackIndex,
+	PackData as DulwichPackData,
 	ThinPackData,
 	write_pack_data,
 )
@@ -147,6 +148,8 @@ class PackStore(db.Model):
 	repository = db.ReferenceProperty(Repositories)
 	sha1 = db.StringListProperty()
 	data = blobstore.BlobReferenceProperty()
+	size = db.IntegerProperty()
+	checksum = db.BlobProperty()
 
 class PackStoreIndex(db.Model):
 	"""
@@ -262,7 +265,8 @@ class ObjectStore(PackBasedObjectStore):
 		query.filter("sha =", name)
 		if query.count(1):
 			obj = query.get()
-			output = Pack(obj.packref).get_ref(name)
+			p = Pack(obj.packref)
+			output = p.get_raw(name)
 			return output[3]
 		else:
 			raise KeyError(name)
@@ -316,6 +320,7 @@ class ObjectStore(PackBasedObjectStore):
 				tempstring = StringIO(fileContents.getvalue())
 				ThinPack = ThinPackData(self.get_raw, filename=None, file=tempstring, size=fileContents.tell())
 				store = PackStore(repository = self.REPO)
+				store.size = fileContents.tell()
 				store.save()
 				p = Pack.Create(store, ThinPack)
 			except:
@@ -345,25 +350,26 @@ class Pack(DulwichPack):
 		#write data
 		blob_name = files.blobstore.create(mime_type='application/octet-stream')
 		with files.open(blob_name, 'a') as blob:
-			blob.write(f.getvalue()) #is this how you correctly write to the datastore?
+			blob.write(f.getvalue())
 		files.finalize(blob_name)
 
 		self.pack_store = pack_store
-		#the line below is what is breaking the application, and I need the internet to find out how to do it
 		self.pack_store.data = files.blobstore.get_blob_key(blob_name)
 		self.pack_store.save()
 		return self
 	
 	""" this was commented out for committing """
 	def __init__(self, pack_store):
-		if pack_store == "":
-			"this is to ensure FromObjects will work"
-			super(Pack, self).__init__("")
-		else:
-			"@TODO: trying to create a new Pack from the datastore"
+		super(Pack, self).__init__("")
+		if pack_store != "": #This is to ensure Pack.FromObjects will work
 			self.pack_store = pack_store
 			blob_reader = blobstore.BlobReader(self.pack_store.data)
-			super(Pack, self).__init__(filename=None, file=blob_reader)
+			self._data_load = lambda: PackData(filename=None, file=blob_reader, size=self.pack_store.size)
+			self._idx_load = lambda: PackIndex(self.pack_store) #@TODO: I need to store the checksum somewhere
+
+
+class PackData(DulwichPackData):
+	pass
 
 class PackIndex(DulwichPackIndex):
 	"""Pack index that is stored entirely in memory."""
@@ -378,7 +384,10 @@ class PackIndex(DulwichPackIndex):
 				offset = offset,
 				crc32 = crc32,
 			).save()
-		return cls(pack_store, pack_data.get_stored_checksum())
+		t_checksum = pack_data.get_stored_checksum()
+		pack_store.checksum=t_checksum
+		pack_store.save()
+		return cls(pack_store)
 	
 	def __init__(self, pack_store, pack_checksum=None):
 		"""Create a new MemoryPackIndex.
@@ -393,7 +402,7 @@ class PackIndex(DulwichPackIndex):
 		for obj in q:
 			self._by_sha[obj.sha] = obj.offset
 			self._entries.append( [obj.sha, obj.offset, obj.crc32] )
-		self._pack_checksum = pack_checksum
+		self._pack_checksum = pack_store.checksum
 
 	def get_pack_checksum(self):
 		return self._pack_checksum
@@ -401,8 +410,8 @@ class PackIndex(DulwichPackIndex):
 	def __len__(self):
 		return len(self._entries)
 
-	def _object_index(self, sha):
-		return self._by_sha[sha][0]
+	def object_index(self, sha):
+		return self._by_sha[sha]
 
 	def _itersha(self):
 		return iter(self._by_sha)
