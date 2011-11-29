@@ -59,9 +59,10 @@ class Repo(BaseRepo):
 		repo = Repositories.get_by_key_name(RepoName)
 		if repo:
 			self.REPO_NAME = RepoName
+			self.REPO = Repositories.get_by_key_name(self.REPO_NAME)
 			self.Bare = True
-			object_store = ObjectStore(RepoName)
-			refs_container = RefsContainer(RepoName)
+			object_store = ObjectStore(self.REPO)
+			refs_container = RefsContainer(self.REPO)
 			BaseRepo.__init__(self, object_store, refs_container)
 		else:
 			raise NotGitRepository(RepoName)
@@ -73,9 +74,8 @@ class Repo(BaseRepo):
 			:param fname: the key of a key value pair
 		"""
 
-		repo = Repositories.get_by_key_name(self.REPO_NAME)
 		obj = db.Query(NamedFiles)
-		obj.filter('repository =', repo)
+		obj.filter('repository =', self.REPO)
 		obj.filter('filename =', fname)
 
 		if obj.count(1): #exists
@@ -91,9 +91,8 @@ class Repo(BaseRepo):
 			:param fname: the key
 			:param contents: the value corresponding to key
 		"""
-		repo = Repositories.get_by_key_name(self.REPO_NAME)
 		obj = db.Query(NamedFiles)
-		obj.filter('repository =', repo)
+		obj.filter('repository =', self.REPO)
 		obj.filter('filename =', fname)
 
 		if obj.count(1): #exists
@@ -102,7 +101,7 @@ class Repo(BaseRepo):
 			f.put()
 		else:
 			NamedFiles(
-				repository = Repositories.get_by_key_name(self.REPO_NAME).key(),
+				repository = self.REPO,
 				filename = fname,
 				contents = contents,
 			).put()
@@ -163,13 +162,12 @@ class PackStoreIndex(db.Model):
 
 class ObjectStore(PackBasedObjectStore):
 	""" object store interface """
-	def __init__(self, REPO_NAME):
+	def __init__(self, REPO):
 		"""
 			specifies which repository the object store should use
 			:param REPO_NAME: the name of the repository object_store should access
 		"""
-		self.REPO_NAME = REPO_NAME
-		self.REPO = Repositories.get_by_key_name(self.REPO_NAME)
+		self.REPO = Repo
 	
 	def contains_loose(self, sha):
 		"""
@@ -202,9 +200,8 @@ class ObjectStore(PackBasedObjectStore):
 
 	def __iter__(self):
 		"""iterate over all sha1s in the objects table"""
-		repo = Repositories.get_by_key_name(self.REPO_NAME)
 		q = db.Query(PackStoreIndex)
-		q.filter('repository = ', repo)
+		q.filter('repository = ', self.REPO)
 		#i'm fairly sure the GAE db.Query object is an iterator hence we can just return the instance
 		return q.__iter__()
 
@@ -217,41 +214,6 @@ class ObjectStore(PackBasedObjectStore):
 			-- this will be a very high cost query --
 		"""
 		return []
-
-	def get_raw_old(self, name):
-		"""return a tuple containing the numeric type and object contents"""
-		"""
-			:return: string
-		"""
-		"""numeric type -> type_name : type_num
-			commit	: 1
-			tree	: 2
-			blob	: 3
-			tag	: 4
-		"""
-		if(len(name)==20):
-			name = sha_to_hex(name)
-		obj = self._query(name)
-		count = obj.count(1)
-		if count:
-			obj = obj.get()
-			""" @todo:
-				appengine always returns a long for type_num
-				the dict below is a stupid way to convert a long to an integer
-				because using python functions to convert between a long and an int
-				are giving me trouble
-				CURRENTLY: this horrible implementation works and there are other things that need fixing
-			"""
-			a = int(obj.type_num)
-			a = {
-				1:1,
-				2:2,
-				3:3,
-				4:4,
-			}.get(obj.type_num)
-			return a, str(obj.data)
-		else:
-			raise KeyError(name)
 
 	def get_raw(self, name):
 		"""
@@ -277,10 +239,10 @@ class ObjectStore(PackBasedObjectStore):
 			we should only be getting thin packs
 			the packs will be converted to full pack and be added through add_objects
 		"""
-		logging.error("call to add object")
+		logging.error("call to add_object")
 		raise CommitError
 		PackStoreIndex(
-			repository = Repositories.get_by_key_name(self.REPO_NAME).key(),
+			repository = self.REPO,
 			sha1 = obj.id,
 			data = obj.as_raw_string(),
 			type_num = obj.type_num,
@@ -288,9 +250,10 @@ class ObjectStore(PackBasedObjectStore):
 
 	def add_objects(self, objects):
 		#get the pack blobstore key
+		logging.error("call to add_objects")
 		for o in objects:
 			PackStoreIndex(
-				repository = Repositories.get_by_key_name(self.REPO_NAME),
+				repository = self.REPO,
 				sha1 = o.id,
 				type_num = o.type_num,
 #				packdata = #blobstore key
@@ -430,63 +393,6 @@ class PackIndex(DulwichPackIndex):
 		#if actual != stored:
 		#	raise ChecksumMismatch(stored, actual)
 
-class ThinPackExtractor(ThinPackData):
-	"""
-		This class is used to extract loose git objects out of the thin pack
-		this should also work for standard git packs, although I have not tested it
-		@todo: alot of work needs to be done here mainly ensuring that all data is extracted safetly
-	"""
-	def __init__(self, object_store, fileIO):
-		"""self.resolve_ext_ref(sha) is created in ThinPackData"""
-		"""self._file is created in ThinPackData"""
-		self.object_store = object_store
-		super(ThinPackExtractor, self).__init__(self.object_store.get_raw, filename=None, file=StringIO(fileIO.getvalue()))
-		#this new stringIO business is due to me being stupid and not being able to figure out how to seek to the beginning of the string
-		
-	def extract(self):
-		"""
-			extracts each object from the pack
-			checks if it is in the datastore
-			if it is not in the datastore add it
-		"""
-		for entry in self.iterentries():
-			sha = sha_to_hex(entry[0])
-			obj_in_datastore = self.object_store.contains_loose(sha)
-			if not obj_in_datastore:
-				type_num, raw_chunks = self.get_object_at(entry[1])
-				realObject = ShaFile.from_raw_chunks(type_num, raw_chunks)
-				self.object_store.add_object(realObject)
-			else:
-				pass #i'll remove this after I finish debugging, but it helps me see program flow
-	
-	def get_size(self):
-		"""	@todo: 
-			returns the size of the object
-			this probably will not work due to some weird things when using stringio
-		"""
-		if self._size == None:
-			self._file.seek(0, os.SEEK_END) #os.SEEK_END simply returns 2
-			self._size = self._file.tell()
-			self._size = self._file.len
-		return self._size
-	
-	def check(self):
-		logging.error("NOT IMPLEMENTED: gae_backend.py ThinPackExtractor.check(): this should verify the objects have been written correctly")
-		"""
-			#@todo: 
-			#we need to verify that everything was written correctly
-			#raise ChecksumMismatch if something is wrong
-			#look in pack.py Pack.check() for an example
-			#after the data is checked we can probably call self.close()
-		"""
-	
-	def close(self):
-		"""
-			closes the file apparantly clearing up memory
-		"""
-		self._file.close()
-
-
 #RefsContainer
 class References(db.Model):
 	repository = db.ReferenceProperty(Repositories)
@@ -494,15 +400,14 @@ class References(db.Model):
 	pointer = db.StringProperty() #this can be an sha1 or a to another ref
 
 class RefsContainer(BaseRefsContainer):
-	def __init__(self, RepoName):
-		self.REPO_NAME = RepoName
+	def __init__(self, Repo):
+		self.REPO = Repo
 	
 	def _query(self, ref=None):
-		repo = Repositories.get_by_key_name(self.REPO_NAME)
 		q = db.Query(References)
 		if ref != None:
 			q.filter('ref =', ref)
-		q.filter('repository =', repo)
+		q.filter('repository =', self.REPO)
 		return q
 	
 	def allkeys(self):
@@ -546,7 +451,7 @@ class RefsContainer(BaseRefsContainer):
 			:other string: the target of this ref (what the reference points at).
 		"""
 		References(
-			repository = Repositories.get_by_key_name(self.REPO_NAME),
+			repository = self.REPO,
 			ref=name,
 			pointer=SYMREF+other,
 		).put()
@@ -561,7 +466,7 @@ class RefsContainer(BaseRefsContainer):
 			ref = query.get()
 			if ref == None:
 				ref = References(
-					repository = Repositories.get_by_key_name(self.REPO_NAME),
+					repository = self.REPO,
 					ref = name,
 				)
 			ref.pointer = new_ref
@@ -574,7 +479,7 @@ class RefsContainer(BaseRefsContainer):
 		""" add a reference if it doesn't exist """
 		if self._query(name).get() == None:
 			References(
-				repository = Repositories.get_by_key_name(self.REPO_NAME),
+				repository = self.REPO,
 				ref = name,
 				pointer = new,
 			).put()
