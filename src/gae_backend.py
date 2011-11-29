@@ -267,7 +267,7 @@ class ObjectStore(PackBasedObjectStore):
 			obj = query.get()
 			p = Pack(obj.packref)
 			output = p.get_raw(name)
-			return output[3]
+			return output
 		else:
 			raise KeyError(name)
 
@@ -405,6 +405,7 @@ class PackIndex(DulwichPackIndex):
 		self._pack_checksum = pack_store.checksum
 
 	def get_pack_checksum(self):
+		#@todo: this returns a blob type, should return a str type
 		return self._pack_checksum
 
 	def __len__(self):
