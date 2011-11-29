@@ -213,6 +213,7 @@ class ObjectStore(PackBasedObjectStore):
 			these would be generated from the datastore blobs
 			-- this will be a very high cost query --
 		"""
+		raise NotImplementedError()
 		return []
 
 	def get_raw(self, name):
@@ -240,6 +241,7 @@ class ObjectStore(PackBasedObjectStore):
 			the packs will be converted to full pack and be added through add_objects
 		"""
 		logging.error("call to add_object")
+		raise NotImplementedError()
 		raise CommitError
 		PackStoreIndex(
 			repository = self.REPO,
@@ -251,6 +253,7 @@ class ObjectStore(PackBasedObjectStore):
 	def add_objects(self, objects):
 		#get the pack blobstore key
 		logging.error("call to add_objects")
+		raise NotImplementedError()
 		for o in objects:
 			PackStoreIndex(
 				repository = self.REPO,
@@ -411,9 +414,6 @@ class RefsContainer(BaseRefsContainer):
 		return q
 	
 	def allkeys(self):
-		#this is returning incorrect data and needs fixing
-		#	the above comment is not comforting
-		#	I have a feeling this was fixed, but as the comment remains I need to verify this
 		keys = []
 		q = self._query()
 		for k in q:
@@ -437,7 +437,6 @@ class RefsContainer(BaseRefsContainer):
 	def get_packed_refs(self):
 		"""
 			refs stores inside a pack
-			we don't use packs so return an empty dict
 		"""
 		return {}
 	
