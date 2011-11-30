@@ -162,7 +162,7 @@ class PackStoreIndex(db.Model):
 
 class ObjectStore(PackBasedObjectStore):
 	""" object store interface """
-	def __init__(self, REPO):
+	def __init__(self, Repo):
 		"""
 			specifies which repository the object store should use
 			:param REPO_NAME: the name of the repository object_store should access

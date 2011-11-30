@@ -27,7 +27,7 @@ class GitRequest(webapp2.RequestHandler):
 			service = self.request.get('service', None)
 			handler_cls = DEFAULT_HANDLERS.get(service, None)
 			if handler_cls:
-				self.response.headers['Content-Type'] = 'application/x-%s-advertisement' % service
+				self.response.headers['Content-Type'] = str('application/x-%s-advertisement' % service)
 				#@todo: set headers to prevent page caching
 				proto = ReceivableProtocol(self.request.body_file.read, self.response.out.write)
 				handler = handler_cls(AppengineBackend(), [repo], proto, stateless_rpc=True, advertise_refs=True)
