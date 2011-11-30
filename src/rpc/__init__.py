@@ -8,7 +8,7 @@ AuthManager()
 from rpc.repo import RepoManager
 RepoManager()
 
-from django.utils import simplejson as json
+import simplejson as json
 
 class Request(webapp.RequestHandler):
 	def get(self, filereq=None):
