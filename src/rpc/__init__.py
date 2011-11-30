@@ -1,6 +1,6 @@
 import re
 
-from google.appengine.ext import webapp
+import webapp2
 
 from rpc.component import componentManager
 from rpc.auth import AuthManager
@@ -8,9 +8,9 @@ AuthManager()
 from rpc.repo import RepoManager
 RepoManager()
 
-import simplejson as json
+import json
 
-class Request(webapp.RequestHandler):
+class Request(webapp2.RequestHandler):
 	def get(self, filereq=None):
 		if filereq == 'index.html':
 			self.response.headers['Content-Type'] = 'text/html'

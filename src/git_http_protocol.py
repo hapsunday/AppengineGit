@@ -1,4 +1,4 @@
-from google.appengine.ext import webapp
+import webapp2
 
 from dulwich.server import DEFAULT_HANDLERS, Backend
 from dulwich.protocol import ReceivableProtocol
@@ -12,7 +12,7 @@ class AppengineBackend(Backend):
 	def open_repository(self, name):
 		return Repo(name)
 
-class GitRequest(webapp.RequestHandler):
+class GitRequest(webapp2.RequestHandler):
 	"""
 		@todo: check to see how much of the service request I can move to a separate function
 	"""
