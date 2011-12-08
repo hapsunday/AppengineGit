@@ -1,0 +1,39 @@
+﻿<!DOCTYPE html>
+<html>
+	<head>
+		<title>git.reidsy.com</title>
+		<!-- temp -->
+		<script type="text/javascript" src="/rpc/rpc.js"></script>
+		<!-- libraries -->
+		<script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/1.7.1/jquery.min.js"></script>
+		<script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jqueryui/1.8.16/jquery-ui.min.js"></script>
+		<link rel="stylesheet" type="text/css" href="http://ajax.googleapis.com/ajax/libs/jqueryui/1.8.7/themes/smoothness/jquery-ui.css" />
+		<!-- custom scripts -->
+		<script type="text/javascript" src="script.js"></script>
+		<link rel="stylesheet" type="text/css" href="style.css" />
+	</head>
+	<body>
+		<h1>git.reidsy.com</h1>
+		<div id="toolbar" class="ui-widget ui-widget-header">
+		</div>
+		<ul id="repositories" class="ui-widget ui-widget-content">
+		</ul>
+		<div style="display:none;">
+			<div id="create_repo" class="ui-widget">
+				<ul>
+					<li><a href="#create_repo:info">Information</a></li>
+					<li><a href="#create_repo:perm">Permissions</a></li>
+				</ul>
+				<form name="create_repo">
+					<div id="create_repo:info">
+						<label>Name: <input type="text" name="name" /></label>
+						<p>Information about repo here</p>
+					</div>
+					<div id="create_repo:perm">
+						<p>Permission settings here</p>
+					</div>
+				</form>
+			</div>
+		</div>
+	</body>
+</html>

@@ -1,0 +1,71 @@
+body {
+	margin:0px;
+	padding:0px;
+}
+.ui-widget {
+	font-size:0.7em;
+}
+label {
+	display:block;
+}
+#toolbar {
+	padding: 5px 4px;
+	display:inline-block;
+	width:100%;
+}
+#infopane {
+	float:right;
+	width:200px;
+}
+table {
+	width:100%;
+	border-spacing:0px;
+	margin:0px 200px 0px 0px;
+/*	font-size: 161%;*/
+}
+table tr td,
+table tr th {
+	padding:5px;
+}
+
+/* for block repo's use the following markup
+<ul id="repositories">
+	<li><div>Inside repo box</div></li>
+</ul>
+And then the following styles
+#repositories {
+	margin:0px 200px 0px 0px;
+	padding:15px;
+}
+#repositories li {
+	display: inline-block;
+	padding: 10px;
+}
+#repositories li div {
+	border: 2px black solid;
+	border-radius:10px;
+	width: 125px;
+	height: 100px;
+	padding:5px;
+}
+*/
+#repositories {
+	list-style-type:none;
+	padding:0px;
+	margin:0px;
+}
+#repositories li {
+	margin:0px;
+	padding:0px;
+}
+#repositories li div.repo {
+	padding: 2px;
+	cursor:pointer;
+}
+#repositories li div.repo span {
+	display: inline-block;
+	margin: 5px;
+}
+#repositories li div.repo span.name {
+	font-size:1.1em;
+}
