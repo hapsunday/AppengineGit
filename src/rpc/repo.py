@@ -14,7 +14,9 @@ class RepoManager(Component):
 		from gae_backend import Repositories
 		repos = []
 		for item in db.Query(Repositories):
-			repos.append( item.key().name() )
+			repos.append({
+				'name': item.key().name(),
+			})
 		return repos
 	
 	@remote
@@ -26,38 +28,45 @@ class RepoManager(Component):
 		:type name: string
 		"""
 		repo = Repo.init_bare(name)
+		return {
+			'errorno':0,
+			'error':'successfully created %s' % name,
+		}
 	
-	def oldcreate(self, name):
+	@remote
+	def delete(self, name):
 		"""
-		create a new repo
-		
-		:param name: the name to give the new repo
+		delete an existing repo
+		:param name: the name of the repo to delete
 		:type name: string
+		:return: an integer representing the result of the operation
 		"""
-		repo = Repo.init_bare(name)
-	
-		from dulwich.objects import Tree
-		tree = Tree()
+		from google.appengine.ext import db
+		from gae_backend import (
+			Repositories,
+			NamedFiles,
+			PackStore,
+			PackStoreIndex,
+			References,
+		)
+		name_repo = Repositories.get_by_key_name(name)
+		#clear named files
+		query = db.Query(NamedFiles)
+		query.filter('repository =', name_repo)
+		db.delete(query)
+		#clear packstore and packstore indexes
+		stores = db.Query(PackStore)
+		stores.filter('repository =', name_repo)
+		for s in stores:
+			query = db.Query(PackStoreIndex)
+			query.filter('packref =', s)
+			db.delete(query)
+		db.delete(stores)
+		#clear references
+		query = db.Query(References)
+		query.filter('repository =', name_repo)
+		db.delete(query)
+		#remove repository
+		db.delete(name_repo)
 		
-		from dulwich.objects import Commit, parse_timezone
-		from time import time
-		commit = Commit()
-		commit.tree = tree.id	#is the tree.id the sha1 of the files contained in tree
-		author = "New Project Wizard <wizard@host>"
-		commit.author = commit.committer = author
-		commit.commit_time = commit.author_time = int(time())
-		tz = parse_timezone('+1000')[0]
-		commit.commit_timezone = commit.author_timezone = tz
-		commit.encoding = "UTF-8"
-		commit.message = "New Project."
-	
-		object_store = repo.object_store
-
-		#then add the tree
-		object_store.add_object(tree)
-		#then add the commit
-		object_store.add_object(commit)
 		
-		repo.refs['refs/heads/master'] = commit.id
-		
-		return {"success":"%s.git created" % name}

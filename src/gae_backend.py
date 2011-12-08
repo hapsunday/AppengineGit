@@ -324,7 +324,6 @@ class Pack(DulwichPack):
 		self.pack_store.save()
 		return self
 	
-	""" this was commented out for committing """
 	def __init__(self, pack_store):
 		super(Pack, self).__init__("")
 		if pack_store != "": #This is to ensure Pack.FromObjects will work

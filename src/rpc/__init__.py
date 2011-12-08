@@ -52,4 +52,5 @@ class Request(webapp2.RequestHandler):
 			args[arg[0]] = arg[1]
 
 		response = componentManager.call(method, args)
+		self.response.headers['Content-Type'] = 'application/json'
 		self.response.out.write( json.dumps( response ) )
