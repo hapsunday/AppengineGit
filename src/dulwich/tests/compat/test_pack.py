@@ -43,19 +43,15 @@ class TestPack(PackTests):
 
     def setUp(self):
         require_git_version((1, 5, 0))
-        PackTests.setUp(self)
+        super(TestPack, self).setUp()
         self._tempdir = tempfile.mkdtemp()
-
-    def tearDown(self):
-        shutil.rmtree(self._tempdir)
-        PackTests.tearDown(self)
+        self.addCleanup(shutil.rmtree, self._tempdir)
 
     def test_copy(self):
         origpack = self.get_pack(pack1_sha)
         self.assertSucceeds(origpack.index.check)
         pack_path = os.path.join(self._tempdir, "Elch")
-        write_pack(pack_path, [(x, "") for x in origpack.iterobjects()],
-                   len(origpack))
+        write_pack(pack_path, origpack.pack_tuples())
         output = run_git_or_fail(['verify-pack', '-v', pack_path])
 
         pack_shas = set()

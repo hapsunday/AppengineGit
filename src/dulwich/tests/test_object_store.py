@@ -19,6 +19,7 @@
 """Tests for the object store interface."""
 
 
+from cStringIO import StringIO
 import os
 import shutil
 import tempfile
@@ -30,6 +31,7 @@ from dulwich.errors import (
     NotTreeError,
     )
 from dulwich.objects import (
+    sha_to_hex,
     object_class,
     Blob,
     Tag,
@@ -39,16 +41,19 @@ from dulwich.objects import (
 from dulwich.object_store import (
     DiskObjectStore,
     MemoryObjectStore,
+    ObjectStoreGraphWalker,
     tree_lookup_path,
     )
 from dulwich.pack import (
-    write_pack_data,
+    REF_DELTA,
+    write_pack_objects,
     )
 from dulwich.tests import (
     TestCase,
     )
 from dulwich.tests.utils import (
     make_object,
+    build_pack,
     )
 
 
@@ -178,6 +183,11 @@ class ObjectStoreTests(object):
         for obj in [testobject, tag1, tag2, tag3]:
             self.assertEqual(testobject, self.store.peel_sha(obj.id))
 
+    def test_get_raw(self):
+        self.store.add_object(testobject)
+        self.assertEqual((Blob.type_num, 'yummy data'),
+                         self.store.get_raw(testobject.id))
+
 
 class MemoryObjectStoreTests(ObjectStoreTests, TestCase):
 
@@ -211,12 +221,33 @@ class DiskObjectStoreTests(PackBasedObjectStoreTests, TestCase):
     def setUp(self):
         TestCase.setUp(self)
         self.store_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.store_dir)
         self.store = DiskObjectStore.init(self.store_dir)
 
     def tearDown(self):
         TestCase.tearDown(self)
         PackBasedObjectStoreTests.tearDown(self)
-        shutil.rmtree(self.store_dir)
+
+    def test_alternates(self):
+        alternate_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, alternate_dir)
+        alternate_store = DiskObjectStore(alternate_dir)
+        b2 = make_object(Blob, data="yummy data")
+        alternate_store.add_object(b2)
+        store = DiskObjectStore(self.store_dir)
+        self.assertRaises(KeyError, store.__getitem__, b2.id)
+        store.add_alternate_path(alternate_dir)
+        self.assertEquals(b2, store[b2.id])
+
+    def test_add_alternate_path(self):
+        store = DiskObjectStore(self.store_dir)
+        self.assertEquals([], store._read_alternate_paths())
+        store.add_alternate_path("/foo/path")
+        self.assertEquals(["/foo/path"], store._read_alternate_paths())
+        store.add_alternate_path("/bar/path")
+        self.assertEquals(
+            ["/foo/path", "/bar/path"],
+            store._read_alternate_paths())
 
     def test_pack_dir(self):
         o = DiskObjectStore(self.store_dir)
@@ -226,15 +257,27 @@ class DiskObjectStoreTests(PackBasedObjectStoreTests, TestCase):
         o = DiskObjectStore(self.store_dir)
         f, commit = o.add_pack()
         b = make_object(Blob, data="more yummy data")
-        write_pack_data(f, [(b, None)], 1)
+        write_pack_objects(f, [(b, None)])
         commit()
 
     def test_add_thin_pack(self):
         o = DiskObjectStore(self.store_dir)
-        f, commit = o.add_thin_pack()
-        b = make_object(Blob, data="more yummy data")
-        write_pack_data(f, [(b, None)], 1)
-        commit()
+        blob = make_object(Blob, data='yummy data')
+        o.add_object(blob)
+
+        f = StringIO()
+        entries = build_pack(f, [
+          (REF_DELTA, (blob.id, 'more yummy data')),
+          ], store=o)
+        pack = o.add_thin_pack(f.read, None)
+
+        packed_blob_sha = sha_to_hex(entries[0][3])
+        pack.check_length_and_checksum()
+        self.assertEqual(sorted([blob.id, packed_blob_sha]), list(pack))
+        self.assertTrue(o.contains_packed(packed_blob_sha))
+        self.assertTrue(o.contains_packed(blob.id))
+        self.assertEqual((Blob.type_num, 'more yummy data'),
+                         o.get_raw(packed_blob_sha))
 
 
 class TreeLookupPathTests(TestCase):
@@ -279,3 +322,58 @@ class TreeLookupPathTests(TestCase):
         self.assertRaises(NotTreeError, tree_lookup_path, self.get_object, self.tree_id, 'ad/b/j')
 
 # TODO: MissingObjectFinderTests
+
+class ObjectStoreGraphWalkerTests(TestCase):
+
+    def get_walker(self, heads, parent_map):
+        return ObjectStoreGraphWalker(heads,
+            parent_map.__getitem__)
+
+    def test_empty(self):
+        gw = self.get_walker([], {})
+        self.assertIs(None, gw.next())
+        gw.ack("aa" * 20)
+        self.assertIs(None, gw.next())
+
+    def test_descends(self):
+        gw = self.get_walker(["a"], {"a": ["b"], "b": []})
+        self.assertEquals("a", gw.next())
+        self.assertEquals("b", gw.next())
+
+    def test_present(self):
+        gw = self.get_walker(["a"], {"a": ["b"], "b": []})
+        gw.ack("a")
+        self.assertIs(None, gw.next())
+
+    def test_parent_present(self):
+        gw = self.get_walker(["a"], {"a": ["b"], "b": []})
+        self.assertEquals("a", gw.next())
+        gw.ack("a")
+        self.assertIs(None, gw.next())
+
+    def test_child_ack_later(self):
+        gw = self.get_walker(["a"], {"a": ["b"], "b": ["c"], "c": []})
+        self.assertEquals("a", gw.next())
+        self.assertEquals("b", gw.next())
+        gw.ack("a")
+        self.assertIs(None, gw.next())
+
+    def test_only_once(self):
+        # a  b
+        # |  |
+        # c  d
+        # \ /
+        #  e
+        gw = self.get_walker(["a", "b"], {
+                "a": ["c"],
+                "b": ["d"],
+                "c": ["e"],
+                "d": ["e"],
+                "e": [],
+                })
+        self.assertEquals("a", gw.next())
+        self.assertEquals("c", gw.next())
+        gw.ack("a")
+        self.assertEquals("b", gw.next())
+        self.assertEquals("d", gw.next())
+        self.assertIs(None, gw.next())

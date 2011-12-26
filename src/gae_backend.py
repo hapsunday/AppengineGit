@@ -400,7 +400,7 @@ class PackIndex(DulwichPackIndex):
 class References(db.Model):
 	repository = db.ReferenceProperty(Repositories)
 	ref = db.StringProperty()
-	pointer = db.StringProperty() #this can be an sha1 or a to another ref
+	pointer = db.StringProperty() #this can be an sha1 or a link to another ref
 
 class RefsContainer(BaseRefsContainer):
 	def __init__(self, Repo):
@@ -415,7 +415,8 @@ class RefsContainer(BaseRefsContainer):
 	
 	def allkeys(self):
 		keys = []
-		q = self._query()
+		q = db.Query(References)
+		q.filter('repository =', self.REPO)
 		for k in q:
 			keys.append(k.ref)
 		return keys
@@ -430,7 +431,8 @@ class RefsContainer(BaseRefsContainer):
 		if refs.count(1):
 			tref = refs.get()
 			tpointer = tref.pointer
-			return tpointer
+			output = "%s" % str(tpointer)
+			return output
 		else:
 			return None
 

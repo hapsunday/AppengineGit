@@ -1,4 +1,3 @@
-from git_http_protocol import GitRequest
 import rpc
 import webapp2
 
@@ -8,7 +7,7 @@ class Web(webapp2.RequestHandler):
 
 app = webapp2.WSGIApplication(
 				[
-					('/([A-Za-z0-9]+).git(/.*)', GitRequest),
+#					('/([A-Za-z0-9]+).git(/.*)', GitRequest),
 					('/rpc/([A-Za-z\.]+)', rpc.Request),
 					('/.*', Web),
 				],

@@ -26,7 +26,6 @@ import errno
 import os
 
 from dulwich.errors import (
-    MissingCommitError,
     NoIndexPresent,
     NotBlobError,
     NotCommitError,
@@ -211,7 +210,7 @@ class RefsContainer(object):
         :param name: The name of the reference.
         :raises KeyError: if a refname is not HEAD or is otherwise not valid.
         """
-        if name == 'HEAD':
+        if name in ('HEAD', 'refs/stash'):
             return
         if not name.startswith('refs/') or not check_ref_format(name[5:]):
             raise RefFormatError(name)
@@ -387,6 +386,40 @@ class DictRefsContainer(RefsContainer):
     def _update_peeled(self, peeled):
         """Update cached peeled refs; intended only for testing."""
         self._peeled.update(peeled)
+
+
+class InfoRefsContainer(RefsContainer):
+    """Refs container that reads refs from a info/refs file."""
+
+    def __init__(self, f):
+        self._refs = {}
+        self._peeled = {}
+        for l in f.readlines():
+            sha, name = l.rstrip("\n").split("\t")
+            if name.endswith("^{}"):
+                name = name[:-3]
+                if not check_ref_format(name):
+                    raise ValueError("invalid ref name '%s'" % name)
+                self._peeled[name] = sha
+            else:
+                if not check_ref_format(name):
+                    raise ValueError("invalid ref name '%s'" % name)
+                self._refs[name] = sha
+
+    def allkeys(self):
+        return self._refs.keys()
+
+    def read_loose_ref(self, name):
+        return self._refs.get(name, None)
+
+    def get_packed_refs(self):
+        return {}
+
+    def get_peeled(self, name):
+        try:
+            return self._peeled[name]
+        except KeyError:
+            return self._refs[name]
 
 
 class DiskRefsContainer(RefsContainer):
@@ -951,51 +984,48 @@ class BaseRepo(object):
             return cached
         return self.object_store.peel_sha(self.refs[ref]).id
 
+    def get_walker(self, include=None, *args, **kwargs):
+        """Obtain a walker for this repository.
+
+        :param include: Iterable of SHAs of commits to include along with their
+            ancestors. Defaults to [HEAD]
+        :param exclude: Iterable of SHAs of commits to exclude along with their
+            ancestors, overriding includes.
+        :param order: ORDER_* constant specifying the order of results. Anything
+            other than ORDER_DATE may result in O(n) memory usage.
+        :param reverse: If True, reverse the order of output, requiring O(n)
+            memory.
+        :param max_entries: The maximum number of entries to yield, or None for
+            no limit.
+        :param paths: Iterable of file or subtree paths to show entries for.
+        :param rename_detector: diff.RenameDetector object for detecting
+            renames.
+        :param follow: If True, follow path across renames/copies. Forces a
+            default rename_detector.
+        :param since: Timestamp to list commits after.
+        :param until: Timestamp to list commits before.
+        :param queue_cls: A class to use for a queue of commits, supporting the
+            iterator protocol. The constructor takes a single argument, the
+            Walker.
+        """
+        from dulwich.walk import Walker
+        if include is None:
+            include = [self.head()]
+        return Walker(self.object_store, include, *args, **kwargs)
+
     def revision_history(self, head):
         """Returns a list of the commits reachable from head.
 
-        Returns a list of commit objects. the first of which will be the commit
-        of head, then following that will be the parents.
-
-        Raises NotCommitError if any no commits are referenced, including if the
-        head parameter isn't the sha of a commit.
-
-        XXX: work out how to handle merges.
+        :param head: The SHA of the head to list revision history for.
+        :return: A list of commit objects reachable from head, starting with
+            head itself, in descending commit time order.
+        :raise MissingCommitError: if any missing commits are referenced,
+            including if the head parameter isn't the SHA of a commit.
         """
-
-        try:
-            commit = self[head]
-        except KeyError:
-            raise MissingCommitError(head)
-
-        if type(commit) != Commit:
-            raise NotCommitError(commit)
-        pending_commits = [commit]
-
-        history = set()
-
-        while pending_commits != []:
-            commit = pending_commits.pop(0)
-
-            if commit in history:
-                continue
-
-            history.add(commit)
-
-            for parent in commit.parents:
-                try:
-                    commit = self[parent]
-                except KeyError:
-                    raise MissingCommitError(head)
-
-                if type(commit) != Commit:
-                    raise NotCommitError(commit)
-
-                pending_commits.append(commit)
-
-        history = list(history)
-        history.sort(key=lambda c:c.commit_time, reverse=True)
-        return history
+        warnings.warn("Repo.revision_history() is deprecated."
+            "Use dulwich.walker.Walker(repo) instead.",
+            category=DeprecationWarning, stacklevel=2)
+        return [e.commit for e in self.get_walker(include=[head])]
 
     def __getitem__(self, name):
         if len(name) in (20, 40):
@@ -1007,6 +1037,9 @@ class BaseRepo(object):
             return self.object_store[self.refs[name]]
         except RefFormatError:
             raise KeyError(name)
+
+    def __iter__(self):
+        raise NotImplementedError(self.__iter__)
 
     def __contains__(self, name):
         if len(name) in (20, 40):
@@ -1028,12 +1061,14 @@ class BaseRepo(object):
     def __delitem__(self, name):
         if name.startswith("refs") or name == "HEAD":
             del self.refs[name]
-        raise ValueError(name)
+        else:
+            raise ValueError(name)
 
-    def do_commit(self, message, committer=None,
+    def do_commit(self, message=None, committer=None,
                   author=None, commit_timestamp=None,
                   commit_timezone=None, author_timestamp=None,
-                  author_timezone=None, tree=None, encoding=None):
+                  author_timezone=None, tree=None, encoding=None,
+                  ref='HEAD', merge_heads=None):
         """Create a new commit.
 
         :param message: Commit message
@@ -1047,6 +1082,8 @@ class BaseRepo(object):
         :param tree: SHA1 of the tree root to use (if not specified the
             current index will be committed).
         :param encoding: Encoding
+        :param ref: Optional ref to commit to (defaults to current branch)
+        :param merge_heads: Merge heads (defaults to .git/MERGE_HEADS)
         :return: New commit SHA1
         """
         import time
@@ -1058,6 +1095,9 @@ class BaseRepo(object):
             if len(tree) != 40:
                 raise ValueError("tree must be a 40-byte hex sha string")
             c.tree = tree
+        if merge_heads is None:
+            # FIXME: Read merge heads from .git/MERGE_HEADS
+            merge_heads = []
         # TODO: Allow username to be missing, and get it from .git/config
         if committer is None:
             raise ValueError("committer not set")
@@ -1080,20 +1120,23 @@ class BaseRepo(object):
         c.author_timezone = author_timezone
         if encoding is not None:
             c.encoding = encoding
+        if message is None:
+            # FIXME: Try to read commit message from .git/MERGE_MSG
+            raise ValueError("No commit message specified")
         c.message = message
         try:
-            old_head = self.refs["HEAD"]
-            c.parents = [old_head]
+            old_head = self.refs[ref]
+            c.parents = [old_head] + merge_heads
             self.object_store.add_object(c)
-            ok = self.refs.set_if_equals("HEAD", old_head, c.id)
+            ok = self.refs.set_if_equals(ref, old_head, c.id)
         except KeyError:
-            c.parents = []
+            c.parents = merge_heads
             self.object_store.add_object(c)
-            ok = self.refs.add_if_new("HEAD", c.id)
+            ok = self.refs.add_if_new(ref, c.id)
         if not ok:
             # Fail if the atomic compare-and-swap failed, leaving the commit and
             # all its objects as garbage.
-            raise CommitError("HEAD changed during commit")
+            raise CommitError("%s changed during commit" % (ref,))
 
         return c.id
 
@@ -1201,6 +1244,31 @@ class Repo(BaseRepo):
                     cleanup_mode(st.st_mode), st.st_uid, st.st_gid, st.st_size,
                     blob.id, 0)
         index.write()
+
+    def clone(self, target_path, mkdir=True, bare=False, origin="origin"):
+        """Clone this repository.
+
+        :param target_path: Target path
+        :param mkdir: Create the target directory
+        :param bare: Whether to create a bare repository
+        :return: Created repository
+        """
+        if not bare:
+            target = self.init(target_path, mkdir=mkdir)
+        else:
+            target = self.init_bare(target_path)
+        self.fetch(target)
+        target.refs.import_refs(
+            'refs/remotes/'+origin, self.refs.as_dict('refs/heads'))
+        target.refs.import_refs(
+            'refs/tags', self.refs.as_dict('refs/tags'))
+        try:
+            target.refs.add_if_new(
+                'refs/heads/master',
+                self.refs['refs/heads/master'])
+        except KeyError:
+            pass
+        return target
 
     def __repr__(self):
         return "<Repo at %r>" % self.path

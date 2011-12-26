@@ -30,18 +30,10 @@ import tempfile
 if sys.version_info >= (2, 7):
     # If Python itself provides an exception, use that
     import unittest
-    from unittest import SkipTest as TestSkipped
-    from unittest import TestCase
+    from unittest import SkipTest, TestCase
 else:
-    try:
-        import unittest2 as unittest
-        from unittest2 import SkipTest as TestSkipped
-        from unittest2 import TestCase
-    except ImportError:
-        import unittest
-        from testtools.testcase import TestSkipped
-        from testtools.testcase import TestCase
-        TestCase.skipException = TestSkipped
+    import unittest2 as unittest
+    from unittest2 import SkipTest, TestCase
 
 
 class BlackboxTestCase(TestCase):
@@ -95,6 +87,7 @@ def self_test_suite():
         'protocol',
         'repository',
         'server',
+        'walk',
         'web',
         ]
     module_names = ['dulwich.tests.test_' + name for name in names]
@@ -111,10 +104,12 @@ def tutorial_test_suite():
         ]
     tutorial_files = ["../../docs/tutorial/%s.txt" % name for name in tutorial]
     def setup(test):
+        test.__old_cwd = os.getcwd()
         test.__dulwich_tempdir = tempfile.mkdtemp()
         os.chdir(test.__dulwich_tempdir)
     def teardown(test):
         shutil.rmtree(test.__dulwich_tempdir)
+        os.chdir(test.__old_cwd)
     return doctest.DocFileSuite(setUp=setup, tearDown=teardown,
         *tutorial_files)
 

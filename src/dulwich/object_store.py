@@ -25,7 +25,6 @@ import itertools
 import os
 import stat
 import tempfile
-import urllib2
 
 from dulwich.diff_tree import (
     tree_changes,
@@ -50,12 +49,14 @@ from dulwich.objects import (
 from dulwich.pack import (
     Pack,
     PackData,
-    ThinPackData,
     iter_sha1,
-    load_pack_index,
-    write_pack,
-    write_pack_data,
+    write_pack_header,
     write_pack_index_v2,
+    write_pack_object,
+    write_pack_objects,
+    compute_file_sha,
+    PackIndexer,
+    PackStreamCopier,
     )
 
 INFODIR = 'info'
@@ -225,6 +226,10 @@ class PackBasedObjectStore(BaseObjectStore):
     def __init__(self):
         self._pack_cache = None
 
+    @property
+    def alternates(self):
+        return []
+
     def contains_packed(self, sha):
         """Check if a particular object is present by SHA1 and is packed."""
         for pack in self.packs:
@@ -271,7 +276,7 @@ class PackBasedObjectStore(BaseObjectStore):
         objects = set()
         for sha in self._iter_loose_objects():
             objects.add((self._get_loose_object(sha), None))
-        self.add_objects(objects)
+        self.add_objects(list(objects))
         for obj, path in objects:
             self._remove_loose_object(obj.id)
         return len(objects)
@@ -309,6 +314,11 @@ class PackBasedObjectStore(BaseObjectStore):
         ret = self._get_loose_object(hexsha)
         if ret is not None:
             return ret.type_num, ret.as_raw_string()
+        for alternate in self.alternates:
+            try:
+                return alternate.get_raw(hexsha)
+            except KeyError:
+                pass
         raise KeyError(hexsha)
 
     def add_objects(self, objects):
@@ -321,7 +331,7 @@ class PackBasedObjectStore(BaseObjectStore):
             # Don't bother writing an empty pack file
             return
         f, commit = self.add_pack()
-        write_pack_data(f, objects, len(objects))
+        write_pack_objects(f, objects)
         return commit()
 
 
@@ -337,6 +347,63 @@ class DiskObjectStore(PackBasedObjectStore):
         self.path = path
         self.pack_dir = os.path.join(self.path, PACKDIR)
         self._pack_cache_time = 0
+        self._alternates = None
+
+    @property
+    def alternates(self):
+        if self._alternates is not None:
+            return self._alternates
+        self._alternates = []
+        for path in self._read_alternate_paths():
+            self._alternates.append(DiskObjectStore(path))
+        return self._alternates
+
+    def _read_alternate_paths(self):
+        try:
+            f = GitFile(os.path.join(self.path, "info", "alternates"),
+                    'rb')
+        except (OSError, IOError), e:
+            if e.errno == errno.ENOENT:
+                return []
+            raise
+        ret = []
+        try:
+            for l in f.readlines():
+                l = l.rstrip("\n")
+                if l[0] == "#":
+                    continue
+                if not os.path.isabs(l):
+                    continue
+                ret.append(l)
+            return ret
+        finally:
+            f.close()
+
+    def add_alternate_path(self, path):
+        """Add an alternate path to this object store.
+        """
+        try:
+            os.mkdir(os.path.join(self.path, "info"))
+        except OSError, e:
+            if e.errno != errno.EEXIST:
+                raise
+        alternates_path = os.path.join(self.path, "info/alternates")
+        f = GitFile(alternates_path, 'wb')
+        try:
+            try:
+                orig_f = open(alternates_path, 'rb')
+            except (OSError, IOError), e:
+                if e.errno != errno.ENOENT:
+                    raise
+            else:
+                try:
+                    f.write(orig_f.read())
+                finally:
+                    orig_f.close()
+            f.write("%s\n" % path)
+        finally:
+            f.close()
+        self.alternates.append(DiskObjectStore(path))
 
     def _load_packs(self):
         pack_files = []
@@ -387,37 +454,82 @@ class DiskObjectStore(PackBasedObjectStore):
     def _remove_loose_object(self, sha):
         os.remove(self._get_shafile_path(sha))
 
-    def move_in_thin_pack(self, path):
+    def _complete_thin_pack(self, f, path, copier, indexer):
         """Move a specific file containing a pack into the pack directory.
 
         :note: The file should be on the same file system as the
             packs directory.
 
+        :param f: Open file object for the pack.
         :param path: Path to the pack file.
+        :param copier: A PackStreamCopier to use for writing pack data.
+        :param indexer: A PackIndexer for indexing the pack.
         """
-        data = ThinPackData(self.get_raw, path)
+        entries = list(indexer)
 
-        # Write index for the thin pack (do we really need this?)
-        temppath = os.path.join(self.pack_dir,
-            sha_to_hex(urllib2.randombytes(20))+".tempidx")
-        data.create_index_v2(temppath)
-        p = Pack.from_objects(data, load_pack_index(temppath))
+        # Update the header with the new number of objects.
+        f.seek(0)
+        write_pack_header(f, len(entries) + len(indexer.ext_refs()))
 
+        # Rescan the rest of the pack, computing the SHA with the new header.
+        new_sha = compute_file_sha(f, end_ofs=-20)
+
+        # Complete the pack.
+        for ext_sha in indexer.ext_refs():
+            assert len(ext_sha) == 20
+            type_num, data = self.get_raw(ext_sha)
+            offset = f.tell()
+            crc32 = write_pack_object(f, type_num, data, sha=new_sha)
+            entries.append((ext_sha, offset, crc32))
+        pack_sha = new_sha.digest()
+        f.write(pack_sha)
+        f.close()
+
+        # Move the pack in.
+        entries.sort()
+        pack_base_name = os.path.join(
+          self.pack_dir, 'pack-' + iter_sha1(e[0] for e in entries))
+        os.rename(path, pack_base_name + '.pack')
+
+        # Write the index.
+        index_file = GitFile(pack_base_name + '.idx', 'wb')
         try:
-            # Write a full pack version
-            temppath = os.path.join(self.pack_dir,
-                sha_to_hex(urllib2.randombytes(20))+".temppack")
-            write_pack(temppath, ((o, None) for o in p.iterobjects()), len(p))
+            write_pack_index_v2(index_file, entries, pack_sha)
+            index_file.close()
         finally:
-            p.close()
+            index_file.abort()
 
-        pack_sha = load_pack_index(temppath+".idx").objects_sha1()
-        newbasename = os.path.join(self.pack_dir, "pack-%s" % pack_sha)
-        os.rename(temppath+".pack", newbasename+".pack")
-        os.rename(temppath+".idx", newbasename+".idx")
-        final_pack = Pack(newbasename)
+        # Add the pack to the store and return it.
+        final_pack = Pack(pack_base_name)
+        final_pack.check_length_and_checksum()
         self._add_known_pack(final_pack)
         return final_pack
+
+    def add_thin_pack(self, read_all, read_some):
+        """Add a new thin pack to this object store.
+
+        Thin packs are packs that contain deltas with parents that exist outside
+        the pack. They should never be placed in the object store directly, and
+        always indexed and completed as they are copied.
+
+        :param read_all: Read function that blocks until the number of requested
+            bytes are read.
+        :param read_some: Read function that returns at least one byte, but may
+            not return the number of bytes requested.
+        :return: A Pack object pointing at the now-completed thin pack in the
+            objects/pack directory.
+        """
+        fd, path = tempfile.mkstemp(dir=self.path, prefix='tmp_pack_')
+        f = os.fdopen(fd, 'w+b')
+
+        try:
+            indexer = PackIndexer(f, resolve_ext_ref=self.get_raw)
+            copier = PackStreamCopier(read_all, read_some, f,
+                                      delta_iter=indexer)
+            copier.verify()
+            return self._complete_thin_pack(f, path, copier, indexer)
+        finally:
+            f.close()
 
     def move_in_pack(self, path):
         """Move a specific file containing a pack into the pack directory.
@@ -441,24 +553,6 @@ class DiskObjectStore(PackBasedObjectStore):
         final_pack = Pack(basename)
         self._add_known_pack(final_pack)
         return final_pack
-
-    def add_thin_pack(self):
-        """Add a new thin pack to this object store.
-
-        Thin packs are packs that contain deltas with parents that exist
-        in a different pack.
-        """
-        fd, path = tempfile.mkstemp(dir=self.pack_dir, suffix=".pack")
-        f = os.fdopen(fd, 'wb')
-        def commit():
-            os.fsync(fd)
-            f.close()
-            if os.path.getsize(path) > 0:
-                return self.move_in_thin_pack(path)
-            else:
-                os.remove(path)
-                return None
-        return f, commit
 
     def add_pack(self):
         """Add a new pack to this object store.
@@ -517,9 +611,17 @@ class MemoryObjectStore(BaseObjectStore):
         super(MemoryObjectStore, self).__init__()
         self._data = {}
 
+    def _to_hexsha(self, sha):
+        if len(sha) == 40:
+            return sha
+        elif len(sha) == 20:
+            return sha_to_hex(sha)
+        else:
+            raise ValueError("Invalid sha %r" % sha)
+
     def contains_loose(self, sha):
         """Check if a particular object is present by SHA1 and is loose."""
-        return sha in self._data
+        return self._to_hexsha(sha) in self._data
 
     def contains_packed(self, sha):
         """Check if a particular object is present by SHA1 and is packed."""
@@ -540,14 +642,15 @@ class MemoryObjectStore(BaseObjectStore):
         :param name: sha for the object.
         :return: tuple with numeric type and object contents.
         """
-        return self[name].as_raw_string()
+        obj = self[self._to_hexsha(name)]
+        return obj.type_num, obj.as_raw_string()
 
     def __getitem__(self, name):
-        return self._data[name]
+        return self._data[self._to_hexsha(name)]
 
     def __delitem__(self, name):
         """Delete an object from this store, for testing only."""
-        del self._data[name]
+        del self._data[self._to_hexsha(name)]
 
     def add_object(self, obj):
         """Add a single object to this object store.
@@ -647,23 +750,17 @@ class ObjectStoreIterator(ObjectIterator):
 
 
 def tree_lookup_path(lookup_obj, root_sha, path):
-    """Lookup an object in a Git tree.
+    """Look up an object in a Git tree.
 
     :param lookup_obj: Callback for retrieving object by SHA1
     :param root_sha: SHA1 of the root tree
     :param path: Path to lookup
+    :return: A tuple of (mode, SHA) of the resulting path.
     """
-    parts = path.split("/")
-    sha = root_sha
-    mode = None
-    for p in parts:
-        obj = lookup_obj(sha)
-        if not isinstance(obj, Tree):
-            raise NotTreeError(sha)
-        if p == '':
-            continue
-        mode, sha = obj[p]
-    return mode, sha
+    tree = lookup_obj(root_sha)
+    if not isinstance(tree, Tree):
+        raise NotTreeError(root_sha)
+    return tree.lookup_path(lookup_obj, path)
 
 
 class MissingObjectFinder(object):
@@ -709,9 +806,12 @@ class MissingObjectFinder(object):
         self.add_todo([(tag.object[1], None, False)])
 
     def next(self):
-        if not self.objects_to_send:
-            return None
-        (sha, name, leaf) = self.objects_to_send.pop()
+        while True:
+            if not self.objects_to_send:
+                return None
+            (sha, name, leaf) = self.objects_to_send.pop()
+            if sha not in self.sha_done:
+                break
         if not leaf:
             o = self.object_store[sha]
             if isinstance(o, Commit):
@@ -757,8 +857,10 @@ class ObjectStoreGraphWalker(object):
             # collect all ancestors
             new_ancestors = set()
             for a in ancestors:
-                if a in self.parents:
-                    new_ancestors.update(self.parents[a])
+                ps = self.parents.get(a)
+                if ps is not None:
+                    new_ancestors.update(ps)
+                self.parents[a] = None
 
             # no more ancestors; stop
             if not new_ancestors:
@@ -772,6 +874,6 @@ class ObjectStoreGraphWalker(object):
             ret = self.heads.pop()
             ps = self.get_parents(ret)
             self.parents[ret] = ps
-            self.heads.update(ps)
+            self.heads.update([p for p in ps if not p in self.parents])
             return ret
         return None

@@ -27,6 +27,7 @@ Documentation/technical directory in the cgit distribution, and in particular:
 
 
 import collections
+import os
 import socket
 import SocketServer
 import sys
@@ -36,6 +37,7 @@ from dulwich.errors import (
     ApplyDeltaError,
     ChecksumMismatch,
     GitProtocolError,
+    NotGitRepository,
     UnexpectedCommandError,
     ObjectFormatException,
     )
@@ -44,8 +46,7 @@ from dulwich.objects import (
     hex_to_sha,
     )
 from dulwich.pack import (
-    PackStreamReader,
-    write_pack_data,
+    write_pack_objects,
     )
 from dulwich.protocol import (
     BufferedPktLineWriter,
@@ -73,14 +74,19 @@ class Backend(object):
     """A backend for the Git smart server implementation."""
 
     def open_repository(self, path):
-        """Open the repository at a path."""
+        """Open the repository at a path.
+
+        :param path: Path to the repository
+        :raise NotGitRepository: no git repository was found at path
+        :return: Instance of BackendRepo
+        """
         raise NotImplementedError(self.open_repository)
 
 
 class BackendRepo(object):
     """Repository abstraction used by the Git server.
-    
-    Please note that the methods required here are a 
+
+    Please note that the methods required here are a
     subset of those provided by dulwich.repo.Repo.
     """
 
@@ -118,32 +124,6 @@ class BackendRepo(object):
         raise NotImplementedError
 
 
-class PackStreamCopier(PackStreamReader):
-    """Class to verify a pack stream as it is being read.
-
-    The pack is read from a ReceivableProtocol using read() or recv() as
-    appropriate and written out to the given file-like object.
-    """
-
-    def __init__(self, read_all, read_some, outfile):
-        super(PackStreamCopier, self).__init__(read_all, read_some)
-        self.outfile = outfile
-
-    def _read(self, read, size):
-        data = super(PackStreamCopier, self)._read(read, size)
-        self.outfile.write(data)
-        return data
-
-    def verify(self):
-        """Verify a pack stream and write it to the output file.
-
-        See PackStreamReader.iterobjects for a list of exceptions this may
-        throw.
-        """
-        for _, _, _ in self.read_objects():
-            pass
-
-
 class DictBackend(Backend):
     """Trivial backend that looks up Git repositories in a dictionary."""
 
@@ -152,8 +132,11 @@ class DictBackend(Backend):
 
     def open_repository(self, path):
         logger.debug('Opening repository at %s', path)
-        # FIXME: What to do in case there is no repo ?
-        return self.repos[path]
+        try:
+            return self.repos[path]
+        except KeyError:
+            raise NotGitRepository("No git repository was found at %(path)s",
+                path=path)
 
 
 class FileSystemBackend(Backend):
@@ -167,9 +150,10 @@ class FileSystemBackend(Backend):
 class Handler(object):
     """Smart protocol command handler base class."""
 
-    def __init__(self, backend, proto):
+    def __init__(self, backend, proto, http_req=None):
         self.backend = backend
         self.proto = proto
+        self.http_req = http_req
         self._client_capabilities = None
 
     @classmethod
@@ -213,12 +197,11 @@ class Handler(object):
 class UploadPackHandler(Handler):
     """Protocol handler for uploading a pack to the server."""
 
-    def __init__(self, backend, args, proto,
-                 stateless_rpc=False, advertise_refs=False):
-        Handler.__init__(self, backend, proto)
+    def __init__(self, backend, args, proto, http_req=None,
+                 advertise_refs=False):
+        Handler.__init__(self, backend, proto, http_req=http_req)
         self.repo = backend.open_repository(args[0])
         self._graph_walker = None
-        self.stateless_rpc = stateless_rpc
         self.advertise_refs = advertise_refs
 
     @classmethod
@@ -280,8 +263,7 @@ class UploadPackHandler(Handler):
 
         self.progress("dul-daemon says what\n")
         self.progress("counting objects: %d, done.\n" % len(objects_iter))
-        write_pack_data(ProtocolFile(None, write), objects_iter, 
-                        len(objects_iter))
+        write_pack_objects(ProtocolFile(None, write), objects_iter)
         self.progress("how was that, then?\n")
         # we are done
         self.proto.write("0000")
@@ -340,7 +322,7 @@ class ProtocolGraphWalker(object):
         self.store = object_store
         self.get_peeled = get_peeled
         self.proto = handler.proto
-        self.stateless_rpc = handler.stateless_rpc
+        self.http_req = handler.http_req
         self.advertise_refs = handler.advertise_refs
         self._wants = []
         self._cached = False
@@ -360,10 +342,12 @@ class ProtocolGraphWalker(object):
         :return: a list of SHA1s requested by the client
         """
         if not heads:
-            raise GitProtocolError('No heads found')
+            # The repo is empty, so short-circuit the whole process.
+            self.proto.write_pkt_line(None)
+            return None
         values = set(heads.itervalues())
-        if self.advertise_refs or not self.stateless_rpc:
-            for i, (ref, sha) in enumerate(heads.iteritems()):
+        if self.advertise_refs or not self.http_req:
+            for i, (ref, sha) in enumerate(sorted(heads.iteritems())):
                 line = "%s %s" % (sha, ref)
                 if not i:
                     line = "%s\x00%s" % (line, self.handler.capability_line())
@@ -399,7 +383,7 @@ class ProtocolGraphWalker(object):
 
         self.set_wants(want_revs)
 
-        if self.stateless_rpc and self.proto.eof():
+        if self.http_req and self.proto.eof():
             # The client may close the socket at this point, expecting a
             # flush-pkt from the server. We might be ready to send a packfile at
             # this point, so we need to explicitly short-circuit in this case.
@@ -416,7 +400,7 @@ class ProtocolGraphWalker(object):
 
     def next(self):
         if not self._cached:
-            if not self._impl and self.stateless_rpc:
+            if not self._impl and self.http_req:
                 return None
             return self._impl.next()
         self._cache_index += 1
@@ -581,7 +565,7 @@ class MultiAckDetailedGraphWalkerImpl(object):
             command, sha = self.walker.read_proto_line(_GRAPH_WALKER_COMMANDS)
             if command is None:
                 self.walker.send_nak()
-                if self.walker.stateless_rpc:
+                if self.walker.http_req:
                     return None
                 continue
             elif command == 'done':
@@ -603,11 +587,10 @@ class MultiAckDetailedGraphWalkerImpl(object):
 class ReceivePackHandler(Handler):
     """Protocol handler for downloading a pack from the client."""
 
-    def __init__(self, backend, args, proto,
-                 stateless_rpc=False, advertise_refs=False):
-        Handler.__init__(self, backend, proto)
+    def __init__(self, backend, args, proto, http_req=None,
+                 advertise_refs=False):
+        Handler.__init__(self, backend, proto, http_req=http_req)
         self.repo = backend.open_repository(args[0])
-        self.stateless_rpc = stateless_rpc
         self.advertise_refs = advertise_refs
 
     @classmethod
@@ -615,18 +598,14 @@ class ReceivePackHandler(Handler):
         return ("report-status", "delete-refs", "side-band-64k")
 
     def _apply_pack(self, refs):
-        f, commit = self.repo.object_store.add_thin_pack()
         all_exceptions = (IOError, OSError, ChecksumMismatch, ApplyDeltaError,
                           AssertionError, socket.error, zlib.error,
                           ObjectFormatException)
         status = []
         # TODO: more informative error messages than just the exception string
         try:
-            PackStreamCopier(self.proto.read, self.proto.recv, f).verify()
-            p = commit()
-            if not p:
-                raise IOError('Failed to write pack')
-            p.check()
+            p = self.repo.object_store.add_thin_pack(self.proto.read,
+                                                     self.proto.recv)
             status.append(('unpack', 'ok'))
         except all_exceptions, e:
             status.append(('unpack', str(e).replace('\n', '')))
@@ -680,9 +659,9 @@ class ReceivePackHandler(Handler):
         flush()
 
     def handle(self):
-        refs = self.repo.get_refs().items()
+        refs = sorted(self.repo.get_refs().iteritems())
 
-        if self.advertise_refs or not self.stateless_rpc:
+        if self.advertise_refs or not self.http_req:
             if refs:
                 self.proto.write_pkt_line(
                   "%s %s\x00%s\n" % (refs[0][1], refs[0][0],
@@ -691,7 +670,7 @@ class ReceivePackHandler(Handler):
                     ref = refs[i]
                     self.proto.write_pkt_line("%s %s\n" % (ref[1], ref[0]))
             else:
-                self.proto.write_pkt_line("%s capabilities^{} %s" % (
+                self.proto.write_pkt_line("%s capabilities^{}\0%s" % (
                   ZERO_SHA, self.capability_line()))
 
             self.proto.write("0000")
@@ -809,3 +788,40 @@ def serve_command(handler_cls, argv=sys.argv, backend=None, inf=sys.stdin,
     # FIXME: Catch exceptions and write a single-line summary to outf.
     handler.handle()
     return 0
+
+
+def generate_info_refs(repo):
+    """Generate an info refs file."""
+    refs = repo.get_refs()
+    for name in sorted(refs.iterkeys()):
+        # get_refs() includes HEAD as a special case, but we don't want to
+        # advertise it
+        if name == 'HEAD':
+            continue
+        sha = refs[name]
+        o = repo.object_store[sha]
+        if not o:
+            continue
+        yield '%s\t%s\n' % (sha, name)
+        peeled_sha = repo.get_peeled(name)
+        if peeled_sha != sha:
+            yield '%s\t%s^{}\n' % (peeled_sha, name)
+
+
+def generate_objects_info_packs(repo):
+    """Generate an index for for packs."""
+    for pack in repo.object_store.packs:
+        yield 'P pack-%s.pack\n' % pack.name()
+
+
+def update_server_info(repo):
+    """Generate server info for dumb file access.
+
+    This generates info/refs and objects/info/packs,
+    similar to "git update-server-info".
+    """
+    repo._put_named_file(os.path.join('info', 'refs'),
+        "".join(generate_info_refs(repo)))
+
+    repo._put_named_file(os.path.join('objects', 'info', 'packs'),
+        "".join(generate_objects_info_packs(repo)))

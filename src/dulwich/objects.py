@@ -41,7 +41,7 @@ from dulwich.errors import (
 from dulwich.file import GitFile
 from dulwich._compat import (
     make_sha,
-    TreeEntryTuple,
+    namedtuple,
     )
 
 ZERO_SHA = "0" * 40
@@ -294,7 +294,7 @@ class ShaFile(object):
     def _is_legacy_object(cls, magic):
         b0, b1 = map(ord, magic)
         word = (b0 << 8) + b1
-        return b0 == 0x78 and (word % 31) == 0
+        return (b0 & 0x8F) == 0x08 and (word % 31) == 0
 
     @classmethod
     def _parse_file_header(cls, f):
@@ -469,15 +469,15 @@ class ShaFile(object):
         return "<%s %s>" % (self.__class__.__name__, self.id)
 
     def __ne__(self, other):
-        return self.id != other.id
+        return not isinstance(other, ShaFile) or self.id != other.id
 
     def __eq__(self, other):
-        """Return true if the sha of the two objects match.
+        """Return True if the SHAs of the two objects match.
 
-        The __le__ etc methods aren't overriden as they make no sense,
-        certainly at this level.
+        It doesn't make sense to talk about an order on ShaFiles, so we don't
+        override the rich comparison methods (__le__, etc.).
         """
-        return self.id == other.id
+        return isinstance(other, ShaFile) and self.id == other.id
 
 
 class Blob(ShaFile):
@@ -688,11 +688,13 @@ class Tag(ShaFile):
     message = serializable_property("message", "The message attached to this tag")
 
 
-class TreeEntry(TreeEntryTuple):
-    """Namedtuple encapsulating a single tree entry."""
+class TreeEntry(namedtuple('TreeEntry', ['path', 'mode', 'sha'])):
+    """Named tuple encapsulating a single tree entry."""
 
     def in_path(self, path):
         """Return a copy of this entry with the given path prepended."""
+        if type(self.path) != str:
+            raise TypeError
         return TreeEntry(posixpath.join(path, self.path), self.mode, self.sha)
 
 
@@ -747,6 +749,8 @@ def sorted_tree_items(entries, name_order):
     for name, entry in sorted(entries.iteritems(), cmp=cmp_func):
         mode, hexsha = entry
         # Stricter type checks than normal to mirror checks in the C version.
+        if not isinstance(mode, int) and not isinstance(mode, long):
+            raise TypeError('Expected integer/long for mode, got %r' % mode)
         mode = int(mode)
         if not isinstance(hexsha, str):
             raise TypeError('Expected a string for SHA, got %r' % hexsha)
@@ -918,6 +922,25 @@ class Tree(ShaFile):
                 kind = "blob"
             text.append("%04o %s %s\t%s\n" % (mode, kind, hexsha, name))
         return "".join(text)
+
+    def lookup_path(self, lookup_obj, path):
+        """Look up an object in a Git tree.
+
+        :param lookup_obj: Callback for retrieving object by SHA1
+        :param path: Path to lookup
+        :return: A tuple of (mode, SHA) of the resulting path.
+        """
+        parts = path.split('/')
+        sha = self.id
+        mode = None
+        for p in parts:
+            if not p:
+                continue
+            obj = lookup_obj(sha)
+            if not isinstance(obj, Tree):
+                raise NotTreeError(sha)
+            mode, sha = obj[p]
+        return mode, sha
 
 
 def parse_timezone(text):
