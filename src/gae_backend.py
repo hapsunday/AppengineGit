@@ -11,9 +11,6 @@ from dulwich.pack import (
 	Pack as DulwichPack,
 	PackIndex as DulwichPackIndex,
 	PackData as DulwichPackData,
-#	ThinPackData,
-#	write_pack_data,
-	iter_sha1,
 	write_pack_header,
 	write_pack_object,
 	compute_file_sha,
@@ -21,23 +18,13 @@ from dulwich.pack import (
 	PackStreamCopier,
 )
 from dulwich.objects import (
-	ShaFile,
 	sha_to_hex,
 	hex_to_sha,
 )
 from dulwich.errors import (
-    MissingCommitError,
-    NoIndexPresent,
-    NotBlobError,
-    NotCommitError,
-    NotGitRepository,
-    NotTreeError,
-    NotTagError,
-    PackedRefsException,
-    CommitError,
-    RefFormatError,
-    ChecksumMismatch
-   )
+	NoIndexPresent,
+	NotGitRepository,
+)
 #appengine imports
 from google.appengine.ext import (
 	db,
@@ -85,7 +72,7 @@ class Repo(BaseRepo):
 		obj.filter('repository =', self.REPO)
 		obj.filter('filename =', fname)
 
-		if obj.count(1): #exists
+		if obj.count(1):
 			f = obj.get()
 			return StringIO(f.contents)
 		else:
@@ -102,7 +89,7 @@ class Repo(BaseRepo):
 		obj.filter('repository =', self.REPO)
 		obj.filter('filename =', fname)
 
-		if obj.count(1): #exists
+		if obj.count(1):
 			f = obj.get()
 			f.contents = contents
 			f.put()
@@ -148,8 +135,7 @@ class Repo(BaseRepo):
 		return repo
 		
 
-#object/pack store
-#objects reference the blob, not the other way round
+#objects can be found from the sha1 list
 class PackStore(db.Model):
 	repository = db.ReferenceProperty(Repositories)
 	sha1 = db.StringListProperty()
@@ -157,6 +143,7 @@ class PackStore(db.Model):
 	size = db.IntegerProperty()
 	checksum = db.BlobProperty()
 
+#the pack is referenced through packref
 class PackStoreIndex(db.Model):
 	"""
 		This is needed, pack indexes are stored in a separate file. This table is that separate file
@@ -259,41 +246,6 @@ class ObjectStore(PackBasedObjectStore):
 		pack_store = PackStore(repository=self.REPO)
 		final_pack = Pack.from_thinpack(pack_store, f, indexer, resolve_ext_ref=self.get_raw)
 		self._add_known_pack(final_pack)
-	
-#	def add_thin_pack(self):
-#		"""
-#			A pack is a single file containing multiple objects
-#			A pack contains a list of references to objects inside the pack
-#			this is done to save parsing through the entire file to find all the objects
-#			
-#			The difference between a pack and thin pack is thin packs contain references
-#			to objects which may not be stored in the pack, rather git must refer to the repository
-#			which contains the referenced object as either a loose object or a pack
-#			
-#			DiskObjectStore, which I used as a reference for this function creates a full pack.
-#			Here I extract all the objects and store them as loose objects in the datastore, similar to
-#			how memory object store works
-#		"""
-#		fileContents = StringIO("")
-#		def newcommit():
-#			try:
-#				#write the new pack
-#				logging.error('starting the write')
-#				#creating a copy of fileContents is done to move the file pointer back to the beginning
-#				fileContents.seek(0,2)
-#				tempstring = StringIO(fileContents.getvalue())
-#				ThinPack = ThinPackData(self.get_raw, filename=None, file=tempstring, size=fileContents.tell())
-#				store = PackStore(repository = self.REPO)
-#				store.size = fileContents.tell()
-#				store.save()
-#				p = Pack.Create(store, ThinPack)
-#			except:
-#				import traceback
-#				traceback.print_exc()
-#				raise CommitError
-#			return p
-#		return fileContents, newcommit
-	
 
 class Pack(DulwichPack):
 	"""
@@ -331,7 +283,7 @@ class Pack(DulwichPack):
 		
 		#store pack info
 		pack_store.data = files.blobstore.get_blob_key(blob_name)
-		#pack_store.sha1 = [entries.name]
+		#pack_store.sha1 #sha's are added when writing the index
 		pack_store.size = f.tell()
 		pack_store.checksum = sha_to_hex(pack_sha)
 		pack_store.save()
@@ -354,14 +306,15 @@ class Pack(DulwichPack):
 		final_pack.check_length_and_checksum()
 		return final_pack
 	
-	""" this was commented out for committing """
 	def __init__(self, pack_store):
 		super(Pack, self).__init__("")
-		if pack_store != "": #This is to ensure Pack.FromObjects will work
+		if pack_store != "": #This is to ensure Pack.FromObjects will work, @todo: the if statement can probably be removed, I don't think FromObjects is used
 			self.pack_store = pack_store
 			blob_reader = blobstore.BlobReader(self.pack_store.data)
 			self._data_load = lambda: PackData(filename=None, file=blob_reader, size=self.pack_store.size)
 			self._idx_load = lambda: PackIndex(self.pack_store) #@TODO: I need to store the checksum somewhere
+		else:
+			logging.error("DEPRICATED: gae_backend.py Pack.__init__() else:")
 
 
 class PackData(DulwichPackData):
@@ -371,6 +324,8 @@ class PackIndex(DulwichPackIndex):
 	"""Pack index that is stored entirely in memory."""
 	@classmethod
 	def create(cls, pack_store, pack_data):
+		#I think this is obsolete
+		logging.error("DEPRICATED: gae_backend.py PackIndex.create()")
 		for sha, offset, crc32 in pack_data.iterentries():
 			sha = sha_to_hex(sha)
 			pack_store.sha1.append(sha)
@@ -379,7 +334,7 @@ class PackIndex(DulwichPackIndex):
 				sha = sha,
 				offset = offset,
 				crc32 = crc32,
-			).save()
+			).save() #this should be optimized, but as it's depricated there is little point
 		t_checksum = pack_data.get_stored_checksum()
 		pack_store.checksum=t_checksum
 		pack_store.save()
@@ -470,8 +425,8 @@ class RefsContainer(BaseRefsContainer):
 		q = db.Query(References)
 		q.filter('repository =', self.REPO)
 		for k in q:
-			s = str(k.ref)
-			keys.append(s)
+			#appengine returns data in unicode, wsgi only accepts str types
+			keys.append( str(k.ref) )
 		return keys
 	
 	def read_loose_ref(self, name):
