@@ -11,12 +11,19 @@ from dulwich.pack import (
 	Pack as DulwichPack,
 	PackIndex as DulwichPackIndex,
 	PackData as DulwichPackData,
-	ThinPackData,
-	write_pack_data,
+#	ThinPackData,
+#	write_pack_data,
+	iter_sha1,
+	write_pack_header,
+	write_pack_object,
+	compute_file_sha,
+	PackIndexer,
+	PackStreamCopier,
 )
 from dulwich.objects import (
 	ShaFile,
 	sha_to_hex,
+	hex_to_sha,
 )
 from dulwich.errors import (
     MissingCommitError,
@@ -168,133 +175,124 @@ class ObjectStore(PackBasedObjectStore):
 			:param REPO_NAME: the name of the repository object_store should access
 		"""
 		self.REPO = Repo
+		super(ObjectStore, self).__init__()
 	
-	def contains_loose(self, sha):
-		"""
-			returns true if an object exists
-			as all objects are stored in packs this will be false
-		"""
-		return False
+	#def alternatives(self):
 	
-	def _iter_loose_objects(self):
-		"""Iterate over the SHAs of all loose objects."""
-		raise NotImplementedError(self._iter_loose_objects)
-
-	def _get_loose_object(self, sha):
-		raise NotImplementedError(self._get_loose_object)
-
-	def _remove_loose_object(self, sha):
-		raise NotImplementedError(self._remove_loose_object)
+	#def contains_packed(self, sha):
 	
-	def contains_packed(self, sha):
-		"""
-			returns true if an object is stored inside a pack
-		"""
-		obj = db.Query(PackStoreIndex)
-		obj.filter('repository =', self.REPO)
-		obj.filter('sha1 =', sha)
-		if( obj.count(1)):
+	def _load_packs(self):
+		q = db.Query(PackStore)
+		q.filter('repository =', self.REPO)
+		ret = []
+		for p in q:
+			ret.append( Pack(p) )
+		return ret
+	
+	def _pack_cache_stale(self):
+		if self._pack_cache != None:
 			return True
 		else:
 			return False
-
-	def __iter__(self):
-		"""iterate over all sha1s in the objects table"""
-		q = db.Query(PackStoreIndex)
-		q.filter('repository = ', self.REPO)
-		#i'm fairly sure the GAE db.Query object is an iterator hence we can just return the instance
-		return q.__iter__()
-
-	#implemented by parent class
-	@property
-	def packs(self):
+	
+	#def _add_known_pack(self, pack):
+	
+	#def packs(self):
+	
+	def _iter_loose_objects(self):
 		"""
-			Returns a list of dulwich.pack.Pack()
-			these would be generated from the datastore blobs
-			-- this will be a very high cost query --
+			Iterate over the SHAs of all loose objects.
+			we don't have loose objects so return an empty iter
 		"""
-		raise NotImplementedError()
-		return []
+		return [].__iter__()
+		
+
+	def _get_loose_object(self, sha):
+		"""
+			return the object with given sha.
+			we don't have loose objects so always None
+		"""
+		return None
+
+	def _remove_loose_object(self, sha):
+		"""this shouldn't be called"""
+		raise NotImplementedError(self._remove_loose_object)
+	
+	def pack_loose_objects(self):
+		logging.error('attempting to pack loose objects')
+		super(ObjectStore, self).pack_loose_objects()
+	
+	#def __iter__(self):
+	
+	#def contains_loose(self, sha):
 
 	def get_raw(self, name):
-		"""
-			return a tuple containing the numeric type and object contents
-			:param name: the sha1 of the object
-		"""
-		if(len(name)==20):
-			name = sha_to_hex(name)
-		query = db.Query(PackStoreIndex)
-		#query.filter("repository =", self.REPO)
-		query.filter("sha =", name)
-		if query.count(1):
-			obj = query.get()
-			p = Pack(obj.packref)
-			output = p.get_raw(name)
-			return output
-		else:
-			raise KeyError(name)
+		return super(ObjectStore, self).get_raw(name)
 
-	def add_object(self, obj):
-		"""
-			adds a single object to the datastore
-			we should only be getting thin packs
-			the packs will be converted to full pack and be added through add_objects
-		"""
-		logging.error("call to add_object")
-		raise NotImplementedError()
-		raise CommitError
-		PackStoreIndex(
-			repository = self.REPO,
-			sha1 = obj.id,
-			data = obj.as_raw_string(),
-			type_num = obj.type_num,
-		).put()
+	#def add_object(self, object):
+		#implemented in BaseObjectStore
+	
+	#def add_objects(self, objects):
+	
+	def add_pack(self):
+		raise NotImplementedError(self.add_pack)
+	
+	def _complete_thin_pack(self, f, path, copier, indexer):
+		"taken from dulwich.object_store.DiskObjectStore._complete_thin_pack"
+		"""Move a specific file containing a pack into the pack directory.
 
-	def add_objects(self, objects):
-		#get the pack blobstore key
-		logging.error("call to add_objects")
-		raise NotImplementedError()
-		for o in objects:
-			PackStoreIndex(
-				repository = self.REPO,
-				sha1 = o.id,
-				type_num = o.type_num,
-#				packdata = #blobstore key
-			).save()
+		:note: The file should be on the same file system as the
+			packs directory.
 
-	def add_thin_pack(self):
+		:param f: Open file object for the pack.
+		:param path: Path to the pack file.
+		:param copier: A PackStreamCopier to use for writing pack data.
+		:param indexer: A PackIndexer for indexing the pack.
 		"""
-			A pack is a single file containing multiple objects
-			A pack contains a list of references to objects inside the pack
-			this is done to save parsing through the entire file to find all the objects
-			
-			The difference between a pack and thin pack is thin packs contain references
-			to objects which may not be stored in the pack, rather git must refer to the repository
-			which contains the referenced object as either a loose object or a pack
-			
-			DiskObjectStore, which I used as a reference for this function creates a full pack.
-			Here I extract all the objects and store them as loose objects in the datastore, similar to
-			how memory object store works
-		"""
-		fileContents = StringIO("")
-		def newcommit():
-			try:
-				#write the new pack
-				logging.error('starting the write')
-				#creating a copy of fileContents is done to move the file pointer back to the beginning
-				fileContents.seek(0,2)
-				tempstring = StringIO(fileContents.getvalue())
-				ThinPack = ThinPackData(self.get_raw, filename=None, file=tempstring, size=fileContents.tell())
-				store = PackStore(repository = self.REPO)
-				store.size = fileContents.tell()
-				store.save()
-				p = Pack.Create(store, ThinPack)
-			except:
-				import traceback
-				traceback.print_exc()
-				raise CommitError
-			return p
-		return fileContents, newcommit
+
+	
+	def add_thin_pack(self, read_all, read_some):
+		f = StringIO()
+		indexer = PackIndexer(f, resolve_ext_ref=self.get_raw)
+		copier = PackStreamCopier(read_all, read_some, f, delta_iter=indexer)
+		copier.verify()
+		pack_store = PackStore(repository=self.REPO)
+		final_pack = Pack.from_thinpack(pack_store, f, indexer, resolve_ext_ref=self.get_raw)
+		self._add_known_pack(final_pack)
+	
+#	def add_thin_pack(self):
+#		"""
+#			A pack is a single file containing multiple objects
+#			A pack contains a list of references to objects inside the pack
+#			this is done to save parsing through the entire file to find all the objects
+#			
+#			The difference between a pack and thin pack is thin packs contain references
+#			to objects which may not be stored in the pack, rather git must refer to the repository
+#			which contains the referenced object as either a loose object or a pack
+#			
+#			DiskObjectStore, which I used as a reference for this function creates a full pack.
+#			Here I extract all the objects and store them as loose objects in the datastore, similar to
+#			how memory object store works
+#		"""
+#		fileContents = StringIO("")
+#		def newcommit():
+#			try:
+#				#write the new pack
+#				logging.error('starting the write')
+#				#creating a copy of fileContents is done to move the file pointer back to the beginning
+#				fileContents.seek(0,2)
+#				tempstring = StringIO(fileContents.getvalue())
+#				ThinPack = ThinPackData(self.get_raw, filename=None, file=tempstring, size=fileContents.tell())
+#				store = PackStore(repository = self.REPO)
+#				store.size = fileContents.tell()
+#				store.save()
+#				p = Pack.Create(store, ThinPack)
+#			except:
+#				import traceback
+#				traceback.print_exc()
+#				raise CommitError
+#			return p
+#		return fileContents, newcommit
 	
 
 class Pack(DulwichPack):
@@ -302,27 +300,59 @@ class Pack(DulwichPack):
 		What I want this class to do
 			- return a dulwich.pack.Pack object from a blobstore key
 			- generate a new pack dulwich.pack.Pack from a ThinPackData
-	"""	
+	"""
 	@classmethod
-	def Create(cls, pack_store, data):
-		"""
-			data is an instance of class ThinPackData(PackData) from dulwich.pack
-		"""
-		idx = PackIndex.create(pack_store, data)
-		self = cls.from_objects(data, idx)
+	def from_thinpack(cls, pack_store, f, indexer, resolve_ext_ref):
+		entries = list(indexer)
+
+		# Update the header with the new number of objects.
+		f.seek(0)
+		write_pack_header(f, len(entries) + len(indexer.ext_refs()))
+
+		# Rescan the rest of the pack, computing the SHA with the new header.
+		new_sha = compute_file_sha(f, end_ofs=-20)
+
+		# Complete the pack.
+		for ext_sha in indexer.ext_refs():
+			assert len(ext_sha) == 20
+			type_num, data = resolve_ext_ref(ext_sha)
+			offset = f.tell()
+			crc32 = write_pack_object(f, type_num, data, sha=new_sha)
+			entries.append((ext_sha, offset, crc32))
+		pack_sha = new_sha.digest()
+		f.write(pack_sha)
+		#f.close()
 		
-		f = StringIO()
-		write_pack_data(f, ((o, None) for o in self.iterobjects()), len(self))
-		#write data
+		#write the pack
 		blob_name = files.blobstore.create(mime_type='application/octet-stream')
 		with files.open(blob_name, 'a') as blob:
 			blob.write(f.getvalue())
 		files.finalize(blob_name)
+		
+		#store pack info
+		pack_store.data = files.blobstore.get_blob_key(blob_name)
+		#pack_store.sha1 = [entries.name]
+		pack_store.size = f.tell()
+		pack_store.checksum = sha_to_hex(pack_sha)
+		pack_store.save()
 
-		self.pack_store = pack_store
-		self.pack_store.data = files.blobstore.get_blob_key(blob_name)
-		self.pack_store.save()
-		return self
+		# Write the index.
+		pack_indexes = [pack_store]
+		for (name, offset, entry_checksum) in entries:
+			idx = PackStoreIndex(
+					packref = pack_store,
+					sha = sha_to_hex(name),
+					offset = offset,
+					crc32 = entry_checksum
+				)
+			pack_store.sha1.append( sha_to_hex(name) )
+			pack_indexes.append(idx)
+		db.save(pack_indexes)
+
+		# Add the pack to the store and return it.
+		final_pack = Pack(pack_store)
+		final_pack.check_length_and_checksum()
+		return final_pack
 	
 	""" this was commented out for committing """
 	def __init__(self, pack_store):
@@ -366,9 +396,10 @@ class PackIndex(DulwichPackIndex):
 		q = db.Query(PackStoreIndex)
 		q.filter('packref =', pack_store)
 		for obj in q:
-			self._by_sha[obj.sha] = obj.offset
-			self._entries.append( [obj.sha, obj.offset, obj.crc32] )
-		self._pack_checksum = pack_store.checksum
+			sha = hex_to_sha(obj.sha)
+			self._by_sha[sha] = obj.offset
+			self._entries.append( [sha, obj.offset, obj.crc32] )
+		self._pack_checksum = hex_to_sha(pack_store.checksum)
 
 	def get_pack_checksum(self):
 		#@todo: this returns a blob type, should return a str type
@@ -405,6 +436,27 @@ class References(db.Model):
 class RefsContainer(BaseRefsContainer):
 	def __init__(self, Repo):
 		self.REPO = Repo
+
+	def set_symbolic_ref(self, name, other):
+		"""
+			refs usually point at objects,
+			however it is possible for a ref to point at another ref
+			an example is HEAD
+			
+			:name string: the name of the ref
+			:other string: the target of this ref (what the reference points at).
+		"""
+		References(
+			repository = self.REPO,
+			ref=name,
+			pointer=SYMREF+other,
+		).put()
+	
+	def get_packed_refs(self):
+		"""
+			refs stores inside a pack
+		"""
+		return {}
 	
 	def _query(self, ref=None):
 		q = db.Query(References)
@@ -418,7 +470,8 @@ class RefsContainer(BaseRefsContainer):
 		q = db.Query(References)
 		q.filter('repository =', self.REPO)
 		for k in q:
-			keys.append(k.ref)
+			s = str(k.ref)
+			keys.append(s)
 		return keys
 	
 	def read_loose_ref(self, name):
@@ -436,26 +489,9 @@ class RefsContainer(BaseRefsContainer):
 		else:
 			return None
 
-	def get_packed_refs(self):
-		"""
-			refs stores inside a pack
-		"""
-		return {}
+
 	
-	def set_symbolic_ref(self, name, other):
-		"""
-			refs usually point at objects,
-			however it is possible for a ref to point at another ref
-			an example is HEAD
-			
-			:name string: the name of the ref
-			:other string: the target of this ref (what the reference points at).
-		"""
-		References(
-			repository = self.REPO,
-			ref=name,
-			pointer=SYMREF+other,
-		).put()
+
 	
 	def set_if_equals(self, name, old_ref, new_ref):
 		"""if old_ref is none we continue
