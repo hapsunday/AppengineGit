@@ -314,7 +314,7 @@ class Pack(DulwichPack):
 			self._data_load = lambda: PackData(filename=None, file=blob_reader, size=self.pack_store.size)
 			self._idx_load = lambda: PackIndex(self.pack_store) #@TODO: I need to store the checksum somewhere
 		else:
-			logging.error("DEPRICATED: gae_backend.py Pack.__init__() else:")
+			logging.error("UNUSED: gae_backend.py Pack.__init__() else:")
 
 
 class PackData(DulwichPackData):
@@ -325,7 +325,7 @@ class PackIndex(DulwichPackIndex):
 	@classmethod
 	def create(cls, pack_store, pack_data):
 		#I think this is obsolete
-		logging.error("DEPRICATED: gae_backend.py PackIndex.create()")
+		logging.error("UNUSED: gae_backend.py PackIndex.create()")
 		for sha, offset, crc32 in pack_data.iterentries():
 			sha = sha_to_hex(sha)
 			pack_store.sha1.append(sha)
