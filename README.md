@@ -2,7 +2,8 @@
 
 > This project is currently untested and is not recommended for production use
 
-A Git server running over http on Google Appengine
+A Git server running over http on Google Appengine.
+
 This project uses Dulwich - a pure Python interface to Git repos http://www.samba.org/~jelmer/dulwich/
 
 ### Running
@@ -33,3 +34,4 @@ This project uses Dulwich - a pure Python interface to Git repos http://www.samb
 
         rpc.send("repo.list", {})
     the http response code (200) should appear under the response heading, followed by a json encoded array of repository names.
+    
